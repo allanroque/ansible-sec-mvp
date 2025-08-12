@@ -1,6 +1,0 @@
----
-plugin: servicenow.itsm.now
-instance:
-  host: "{{ sn_host }}"
-  username: "{{ sn_username }}"
-  password: "{{ sn_password }}"
