@@ -1,0 +1,77 @@
+---
+- name: Checklist de Rede - Verificar conectividade
+  debug:
+    msg: "Executando checklist de rede para incidente {{ current_incident.number }}"
+
+- name: Verificar conectividade de rede básica
+  ping:
+    data: "pong"
+  register: ping_result
+
+- name: Adicionar verificação de conectividade ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar conectividade de rede', 'status': 'Concluído - Ping OK' if ping_result.ping == 'pong' else 'Falha'}] }}"
+
+- name: Verificar interfaces de rede
+  shell: "ip addr show"
+  register: network_interfaces
+  changed_when: false
+
+- name: Adicionar verificação de interfaces ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar interfaces de rede', 'status': 'Concluído - ' + (network_interfaces.stdout_lines | length | string) + ' interfaces encontradas'}] }}"
+
+- name: Verificar roteamento
+  shell: "ip route show"
+  register: routing_table
+  changed_when: false
+
+- name: Adicionar verificação de roteamento ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar tabela de roteamento', 'status': 'Concluído - ' + (routing_table.stdout_lines | length | string) + ' rotas encontradas'}] }}"
+
+- name: Verificar conectividade com gateway
+  shell: "ping -c 3 $(ip route | grep default | awk '{print $3}')"
+  register: gateway_ping
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de gateway ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar conectividade com gateway', 'status': 'Concluído - Gateway acessível' if gateway_ping.rc == 0 else 'Falha - Gateway inacessível'}] }}"
+
+- name: Verificar DNS
+  shell: "nslookup google.com"
+  register: dns_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de DNS ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar resolução DNS', 'status': 'Concluído - DNS funcionando' if dns_check.rc == 0 else 'Falha - DNS não funcionando'}] }}"
+
+- name: Verificar portas críticas
+  wait_for:
+    host: "{{ item }}"
+    port: "{{ item.port }}"
+    timeout: 5
+  loop:
+    - { host: "8.8.8.8", port: 53 }
+    - { host: "1.1.1.1", port: 53 }
+  register: port_check
+  ignore_errors: true
+
+- name: Adicionar verificação de portas ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar portas críticas (DNS)', 'status': 'Concluído - Portas acessíveis' if port_check.results[0].state == 'started' else 'Falha - Portas inacessíveis'}] }}"
+
+- name: Adicionar próximos passos específicos de rede
+  set_fact:
+    next_steps: "{{ next_steps + ['Verificar logs de firewall', 'Analisar configurações de VLAN', 'Verificar switches e roteadores', 'Testar conectividade com serviços críticos'] }}"
+
+- name: Log do checklist de rede
+  debug:
+    msg: |
+      Checklist de rede concluído para incidente {{ current_incident.number }}
+      Ações realizadas: {{ checklist_actions | length }}
+      Próximos passos: {{ next_steps | length }}

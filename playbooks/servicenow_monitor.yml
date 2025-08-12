@@ -1,0 +1,148 @@
+---
+- name: Monitoramento ServiceNow - Incidentes e Changes
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - "../group_vars/all.yml"
+  
+  tasks:
+    - name: Definir timestamp de execução
+      set_fact:
+        execution_time: "{{ ansible_date_time.iso8601 }}"
+    
+    - name: Verificar conectividade com ServiceNow
+      uri:
+        url: "https://{{ servicenow.instance }}/api/now/table/incident"
+        method: GET
+        user: "{{ servicenow.username }}"
+        password: "{{ servicenow.password }}"
+        force_basic_auth: yes
+        status_code: [200, 401, 403]
+        timeout: "{{ servicenow.timeout }}"
+      register: servicenow_connectivity
+      retries: "{{ retry.max_attempts }}"
+      delay: "{{ retry.delay }}"
+      until: servicenow_connectivity.status == 200
+    
+    - name: Falhar se não conseguir conectar ao ServiceNow
+      fail:
+        msg: "Não foi possível conectar ao ServiceNow. Status: {{ servicenow_connectivity.status }}"
+      when: servicenow_connectivity.status != 200
+    
+    - name: Buscar incidentes ativos
+      uri:
+        url: "https://{{ servicenow.instance }}/api/now/table/incident"
+        method: GET
+        user: "{{ servicenow.username }}"
+        password: "{{ servicenow.password }}"
+        force_basic_auth: yes
+        headers:
+          Accept: "application/json"
+        url_username: "{{ servicenow.username }}"
+        url_password: "{{ servicenow.password }}"
+        validate_certs: yes
+        timeout: "{{ servicenow.timeout }}"
+        return_content: yes
+      register: incidents_response
+      retries: "{{ retry.max_attempts }}"
+      delay: "{{ retry.delay }}"
+      until: incidents_response.status == 200
+    
+    - name: Buscar changes ativos
+      uri:
+        url: "https://{{ servicenow.instance }}/api/now/table/change_request"
+        method: GET
+        user: "{{ servicenow.username }}"
+        password: "{{ servicenow.password }}"
+        force_basic_auth: yes
+        headers:
+          Accept: "application/json"
+        url_username: "{{ servicenow.username }}"
+        url_password: "{{ servicenow.password }}"
+        validate_certs: yes
+        timeout: "{{ servicenow.timeout }}"
+        return_content: yes
+      register: changes_response
+      retries: "{{ retry.max_attempts }}"
+      delay: "{{ retry.delay }}"
+      until: changes_response.status == 200
+    
+    - name: Processar incidentes
+      set_fact:
+        processed_incidents: "{{ incidents_response.json.result | selectattr('state', 'equalto', '1') | list }}"
+    
+    - name: Processar changes
+      set_fact:
+        processed_changes: "{{ changes_response.json.result | selectattr('state', 'in', ['1', '2']) | list }}"
+    
+    - name: Identificar incidentes novos (últimas 24h)
+      set_fact:
+        new_incidents: "{{ processed_incidents | selectattr('opened_at', 'regex', '.*') | list }}"
+      vars:
+        yesterday: "{{ (ansible_date_time.epoch | int) - 86400 }}"
+    
+    - name: Identificar incidentes com SLA próximo de violar
+      set_fact:
+        sla_warning_incidents: "{{ processed_incidents | selectattr('sla_due', 'defined') | list }}"
+    
+    - name: Identificar incidentes com SLA violado
+      set_fact:
+        sla_violated_incidents: "{{ processed_incidents | selectattr('sla_due', 'defined') | list }}"
+    
+    - name: Identificar incidentes sem atualização há mais de 24h
+      set_fact:
+        stale_incidents: "{{ processed_incidents | selectattr('sys_updated_on', 'regex', '.*') | list }}"
+    
+    - name: Preparar dados para notificação
+      set_fact:
+        notification_data:
+          execution_time: "{{ execution_time }}"
+          new_incidents: "{{ new_incidents | length }}"
+          sla_warning_incidents: "{{ sla_warning_incidents | length }}"
+          sla_violated_incidents: "{{ sla_violated_incidents | length }}"
+          stale_incidents: "{{ stale_incidents | length }}"
+          new_changes: "{{ processed_changes | length }}"
+          total_incidents: "{{ processed_incidents | length }}"
+          total_changes: "{{ processed_changes | length }}"
+    
+    - name: Enviar notificação para Google Chat
+      include_tasks: "../roles/google_chat_notify/tasks/main.yml"
+      when: 
+        - new_incidents | length > 0 or 
+          sla_warning_incidents | length > 0 or 
+          sla_violated_incidents | length > 0 or 
+          stale_incidents | length > 0 or 
+          processed_changes | length > 0
+    
+    - name: Executar checklist técnico para incidentes críticos
+      include_tasks: "../roles/incident_checklist/tasks/main.yml"
+      when: processed_incidents | length > 0
+      vars:
+        critical_incidents: "{{ processed_incidents | selectattr('priority', 'equalto', '1') | list }}"
+    
+    - name: Salvar relatório de execução
+      copy:
+        content: |
+          Execução: {{ execution_time }}
+          Total de Incidentes: {{ processed_incidents | length }}
+          Total de Changes: {{ processed_changes | length }}
+          Novos Incidentes: {{ new_incidents | length }}
+          SLA Warning: {{ sla_warning_incidents | length }}
+          SLA Violado: {{ sla_violated_incidents | length }}
+          Tickets Stale: {{ stale_incidents | length }}
+        dest: "/var/log/ansible/servicenow_monitor_{{ execution_time | regex_replace(':', '-') }}.log"
+        mode: '0644'
+    
+    - name: Limpar logs antigos
+      find:
+        paths: "/var/log/ansible"
+        patterns: "servicenow_monitor_*.log"
+        age: "7d"
+      register: old_logs
+    
+    - name: Remover logs antigos
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_logs.files }}"
+      when: old_logs.files | length > 0

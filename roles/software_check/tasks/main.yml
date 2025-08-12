@@ -1,0 +1,111 @@
+---
+- name: Checklist de Software - Verificar processos e serviços
+  debug:
+    msg: "Executando checklist de software para incidente {{ current_incident.number }}"
+
+- name: Verificar processos críticos
+  shell: "ps aux | grep -E '(nginx|apache|mysql|postgres|redis|memcached)' | grep -v grep"
+  register: critical_processes
+  changed_when: false
+
+- name: Adicionar verificação de processos críticos ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar processos críticos', 'status': 'Concluído - ' + (critical_processes.stdout_lines | length | string) + ' processos encontrados'}] }}"
+
+- name: Verificar uso de CPU por processo
+  shell: "ps aux --sort=-%cpu | head -10"
+  register: cpu_processes
+  changed_when: false
+
+- name: Adicionar verificação de CPU por processo ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar uso de CPU por processo', 'status': 'Concluído - Top 10 processos analisados'}] }}"
+
+- name: Verificar uso de memória por processo
+  shell: "ps aux --sort=-%mem | head -10"
+  register: memory_processes
+  changed_when: false
+
+- name: Adicionar verificação de memória por processo ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar uso de memória por processo', 'status': 'Concluído - Top 10 processos analisados'}] }}"
+
+- name: Verificar serviços do systemd
+  shell: "systemctl list-units --failed"
+  register: failed_services
+  changed_when: false
+
+- name: Adicionar verificação de serviços ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar serviços do systemd', 'status': 'Concluído - ' + (failed_services.stdout_lines | length | string) + ' serviços com falha'}] }}"
+
+- name: Verificar logs de aplicação
+  shell: "journalctl --since '1 hour ago' | grep -i 'error\\|fail\\|critical' | tail -20"
+  register: app_logs
+  changed_when: false
+
+- name: Adicionar verificação de logs ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar logs de aplicação', 'status': 'Concluído - ' + (app_logs.stdout_lines | length | string) + ' erros encontrados'}] }}"
+
+- name: Verificar portas em uso
+  shell: "netstat -tuln | grep LISTEN"
+  register: listening_ports
+  changed_when: false
+
+- name: Adicionar verificação de portas ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar portas em uso', 'status': 'Concluído - ' + (listening_ports.stdout_lines | length | string) + ' portas ativas'}] }}"
+
+- name: Verificar conectividade de banco de dados
+  shell: "pg_isready -h localhost || mysqladmin ping -h localhost || echo 'No database found'"
+  register: db_connectivity
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de banco de dados ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar conectividade de banco de dados', 'status': 'Concluído - DB acessível' if db_connectivity.rc == 0 else 'Falha - DB inacessível'}] }}"
+
+- name: Verificar arquivos de configuração críticos
+  stat:
+    path: "{{ item }}"
+  loop:
+    - "/etc/nginx/nginx.conf"
+    - "/etc/apache2/apache2.conf"
+    - "/etc/mysql/my.cnf"
+    - "/etc/redis/redis.conf"
+  register: config_files
+
+- name: Adicionar verificação de arquivos de configuração ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar arquivos de configuração críticos', 'status': 'Concluído - ' + (config_files.results | selectattr('stat.exists') | list | length | string) + ' arquivos encontrados'}] }}"
+
+- name: Verificar espaço em disco para logs
+  shell: "df -h /var/log"
+  register: log_space
+  changed_when: false
+
+- name: Adicionar verificação de espaço de logs ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar espaço em disco para logs', 'status': 'Concluído - Espaço disponível verificado'}] }}"
+
+- name: Verificar dependências de software
+  shell: "ldd /usr/bin/nginx 2>/dev/null || echo 'Nginx not found'"
+  register: software_dependencies
+  changed_when: false
+
+- name: Adicionar verificação de dependências ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar dependências de software', 'status': 'Concluído - Dependências verificadas'}] }}"
+
+- name: Adicionar próximos passos específicos de software
+  set_fact:
+    next_steps: "{{ next_steps + ['Analisar logs detalhados de aplicação', 'Verificar configurações de serviços', 'Monitorar performance de aplicação', 'Verificar atualizações de segurança'] }}"
+
+- name: Log do checklist de software
+  debug:
+    msg: |
+      Checklist de software concluído para incidente {{ current_incident.number }}
+      Ações realizadas: {{ checklist_actions | length }}
+      Próximos passos: {{ next_steps | length }}

@@ -1,0 +1,83 @@
+---
+- name: Preparar dados de notificação
+  set_fact:
+    notification_summary: |
+      📊 **Resumo ServiceNow - {{ ansible_date_time.iso8601 }}**
+      
+      • Novos Incidentes: {{ notification_data.new_incidents }}
+      • SLA Warning: {{ notification_data.sla_warning_incidents }}
+      • SLA Violado: {{ notification_data.sla_violated_incidents }}
+      • Tickets Stale: {{ notification_data.stale_incidents }}
+      • Novos Changes: {{ notification_data.new_changes }}
+      
+      Total: {{ notification_data.total_incidents }} incidentes, {{ notification_data.total_changes }} changes
+
+- name: Determinar cor baseada na severidade
+  set_fact:
+    card_color: "{{ notifications.colors.new_ticket }}"
+  when: notification_data.new_incidents > 0
+
+- name: Definir cor para SLA warning
+  set_fact:
+    card_color: "{{ notifications.colors.sla_warning }}"
+  when: notification_data.sla_warning_incidents > 0
+
+- name: Definir cor para SLA violado
+  set_fact:
+    card_color: "{{ notifications.colors.sla_violated }}"
+  when: notification_data.sla_violated_incidents > 0
+
+- name: Definir cor para tickets stale
+  set_fact:
+    card_color: "{{ notifications.colors.stale_ticket }}"
+  when: notification_data.stale_incidents > 0
+
+- name: Construir card do Google Chat
+  set_fact:
+    chat_card:
+      cards:
+        - header:
+            title: "ServiceNow Monitor"
+            subtitle: "{{ google_chat.space_name }}"
+            imageUrl: "https://www.servicenow.com/content/dam/servicenow-assets/public/images/favicon.ico"
+          sections:
+            - widgets:
+                - textParagraph:
+                    text: "{{ notification_summary }}"
+            - widgets:
+                - buttons:
+                    - textButton:
+                        text: "Ver ServiceNow"
+                        onClick:
+                          openLink:
+                            url: "https://{{ servicenow.instance }}"
+                    - textButton:
+                        text: "Dashboard"
+                        onClick:
+                          openLink:
+                            url: "https://{{ servicenow.instance }}/nav_to.do?uri=dashboard.do"
+
+- name: Enviar notificação para Google Chat
+  uri:
+    url: "{{ google_chat.webhook_url }}"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body: "{{ chat_card }}"
+    timeout: "{{ google_chat.timeout }}"
+    status_code: [200, 204]
+  register: chat_response
+  retries: "{{ retry.max_attempts }}"
+  delay: "{{ retry.delay }}"
+  until: chat_response.status in [200, 204]
+
+- name: Log de sucesso
+  debug:
+    msg: "Notificação enviada com sucesso para Google Chat - Status: {{ chat_response.status }}"
+  when: chat_response.status in [200, 204]
+
+- name: Log de erro
+  debug:
+    msg: "Falha ao enviar notificação - Status: {{ chat_response.status }}"
+  when: chat_response.status not in [200, 204]

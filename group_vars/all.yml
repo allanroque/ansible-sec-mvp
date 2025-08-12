@@ -1,0 +1,109 @@
+# Configurações globais para integração ServiceNow e Google Chat
+
+# ServiceNow Configuration
+servicenow:
+  instance: "{{ lookup('env', 'SERVICENOW_INSTANCE') | default('your-instance.service-now.com') }}"
+  username: "{{ lookup('env', 'SERVICENOW_USERNAME') | default('ansible_user') }}"
+  password: "{{ lookup('env', 'SERVICENOW_PASSWORD') | default('ansible_password') }}"
+  api_version: "v2"
+  timeout: 30
+
+# Google Chat Configuration
+google_chat:
+  webhook_url: "{{ lookup('env', 'GOOGLE_CHAT_WEBHOOK') | default('https://chat.googleapis.com/v1/spaces/...') }}"
+  space_name: "{{ lookup('env', 'GOOGLE_CHAT_SPACE') | default('SRE Team') }}"
+  timeout: 10
+
+# Configurações de Monitoramento
+monitoring:
+  # Intervalos em minutos
+  check_interval: 15
+  sla_warning_threshold: 60  # Minutos antes da violação do SLA
+  stale_ticket_threshold: 1440  # 24 horas em minutos
+  
+  # Filtros para tickets
+  incident_filters:
+    state: "active"
+    priority: ["1", "2", "3"]  # Prioridades altas
+    category: ["hardware", "software", "network", "security"]
+  
+  change_filters:
+    state: ["in_progress", "pending"]
+    priority: ["1", "2"]
+
+# Configurações de Notificação
+notifications:
+  # Cores para diferentes tipos de alerta
+  colors:
+    new_ticket: "#4285F4"      # Azul
+    sla_warning: "#FBBC04"     # Amarelo
+    sla_violated: "#EA4335"    # Vermelho
+    stale_ticket: "#FF6B35"    # Laranja
+    resolved: "#34A853"        # Verde
+  
+  # Templates de mensagem
+  templates:
+    new_incident: "🚨 **Novo Incidente**: {{ incident.number }} - {{ incident.short_description }}"
+    sla_warning: "⚠️ **SLA Próximo de Violar**: {{ incident.number }} - {{ incident.short_description }}"
+    sla_violated: "🚨 **SLA Violado**: {{ incident.number }} - {{ incident.short_description }}"
+    stale_ticket: "⏰ **Ticket Sem Atualização**: {{ incident.number }} - {{ incident.short_description }}"
+    new_change: "📋 **Novo Change**: {{ change.number }} - {{ change.short_description }}"
+
+# Checklist Técnico por Tipo de Incidente
+incident_checklists:
+  network:
+    - name: "Verificar conectividade de rede"
+      description: "Testar conectividade entre dispositivos"
+      playbook: "roles/network_check/tasks/main.yml"
+    - name: "Verificar logs de firewall"
+      description: "Analisar logs de firewall e roteadores"
+      playbook: "roles/firewall_check/tasks/main.yml"
+    - name: "Verificar configurações de VLAN"
+      description: "Validar configurações de VLAN e trunking"
+      playbook: "roles/vlan_check/tasks/main.yml"
+  
+  hardware:
+    - name: "Verificar status de hardware"
+      description: "Monitorar temperatura, ventiladores e alimentação"
+      playbook: "roles/hardware_check/tasks/main.yml"
+    - name: "Verificar logs de sistema"
+      description: "Analisar logs de sistema e eventos"
+      playbook: "roles/system_logs/tasks/main.yml"
+    - name: "Verificar redundância"
+      description: "Validar sistemas de redundância"
+      playbook: "roles/redundancy_check/tasks/main.yml"
+  
+  software:
+    - name: "Verificar processos críticos"
+      description: "Monitorar processos e serviços críticos"
+      playbook: "roles/process_check/tasks/main.yml"
+    - name: "Verificar uso de recursos"
+      description: "Analisar CPU, memória e disco"
+      playbook: "roles/resource_check/tasks/main.yml"
+    - name: "Verificar logs de aplicação"
+      description: "Analisar logs de aplicação"
+      playbook: "roles/app_logs/tasks/main.yml"
+  
+  security:
+    - name: "Verificar tentativas de acesso"
+      description: "Analisar logs de autenticação"
+      playbook: "roles/auth_check/tasks/main.yml"
+    - name: "Verificar integridade de arquivos"
+      description: "Validar integridade de arquivos críticos"
+      playbook: "roles/integrity_check/tasks/main.yml"
+    - name: "Verificar configurações de segurança"
+      description: "Validar configurações de firewall e IDS"
+      playbook: "roles/security_config/tasks/main.yml"
+
+# Configurações de Log
+logging:
+  level: "INFO"
+  file: "/var/log/ansible/servicenow_monitor.log"
+  max_size: "10MB"
+  backup_count: 5
+
+# Configurações de Retry
+retry:
+  max_attempts: 3
+  delay: 5
+  backoff: 2

@@ -1,0 +1,80 @@
+---
+- name: Checklist Técnico - Incidentes ServiceNow
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - "../group_vars/all.yml"
+  
+  tasks:
+    - name: Verificar se incidentes críticos foram fornecidos
+      fail:
+        msg: "Nenhum incidente crítico fornecido para análise"
+      when: critical_incidents is not defined or critical_incidents | length == 0
+    
+    - name: Processar cada incidente crítico
+      include_tasks: "../roles/incident_checklist/tasks/process_incident.yml"
+      loop: "{{ critical_incidents }}"
+      loop_control:
+        loop_var: current_incident
+    
+    - name: Executar checklist para incidentes de rede
+      include_tasks: "../roles/network_check/tasks/main.yml"
+      when: 
+        - current_incident.category is defined
+        - current_incident.category == "network"
+    
+    - name: Executar checklist para incidentes de hardware
+      include_tasks: "../roles/hardware_check/tasks/main.yml"
+      when: 
+        - current_incident.category is defined
+        - current_incident.category == "hardware"
+    
+    - name: Executar checklist para incidentes de software
+      include_tasks: "../roles/software_check/tasks/main.yml"
+      when: 
+        - current_incident.category is defined
+        - current_incident.category == "software"
+    
+    - name: Executar checklist para incidentes de segurança
+      include_tasks: "../roles/security_check/tasks/main.yml"
+      when: 
+        - current_incident.category is defined
+        - current_incident.category == "security"
+    
+    - name: Atualizar incidente com progresso do checklist
+      uri:
+        url: "https://{{ servicenow.instance }}/api/now/table/incident/{{ current_incident.sys_id }}"
+        method: PUT
+        user: "{{ servicenow.username }}"
+        password: "{{ servicenow.password }}"
+        force_basic_auth: yes
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          work_notes: |
+            ✅ **Checklist Técnico Executado**
+            
+            **Incidente**: {{ current_incident.number }}
+            **Categoria**: {{ current_incident.category }}
+            **Executado em**: {{ ansible_date_time.iso8601 }}
+            
+            **Ações Realizadas**:
+            {% for action in checklist_actions %}
+            • {{ action.name }}: {{ action.status }}
+            {% endfor %}
+            
+            **Próximos Passos**:
+            {% for next_step in next_steps %}
+            • {{ next_step }}
+            {% endfor %}
+        timeout: "{{ servicenow.timeout }}"
+        status_code: [200, 204]
+      register: update_response
+      retries: "{{ retry.max_attempts }}"
+      delay: "{{ retry.delay }}"
+      until: update_response.status in [200, 204]
+    
+    - name: Enviar notificação de checklist concluído
+      include_tasks: "../roles/google_chat_notify/tasks/checklist_complete.yml"
+      when: update_response.status in [200, 204]

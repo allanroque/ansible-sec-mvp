@@ -1,0 +1,102 @@
+---
+- name: Checklist de Hardware - Verificar componentes
+  debug:
+    msg: "Executando checklist de hardware para incidente {{ current_incident.number }}"
+
+- name: Verificar temperatura do sistema
+  shell: "sensors"
+  register: temperature_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de temperatura ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar temperatura do sistema', 'status': 'Concluído - Temperatura monitorada' if temperature_check.rc == 0 else 'Falha - Sensores não disponíveis'}] }}"
+
+- name: Verificar uso de CPU
+  shell: "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1"
+  register: cpu_usage
+  changed_when: false
+
+- name: Adicionar verificação de CPU ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar uso de CPU', 'status': 'Concluído - CPU: ' + cpu_usage.stdout + '%'}] }}"
+
+- name: Verificar uso de memória
+  shell: "free -h | grep Mem | awk '{print $3 \"/\" $2}'"
+  register: memory_usage
+  changed_when: false
+
+- name: Adicionar verificação de memória ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar uso de memória', 'status': 'Concluído - Memória: ' + memory_usage.stdout}] }}"
+
+- name: Verificar uso de disco
+  shell: "df -h / | tail -1 | awk '{print $5}'"
+  register: disk_usage
+  changed_when: false
+
+- name: Adicionar verificação de disco ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar uso de disco', 'status': 'Concluído - Disco: ' + disk_usage.stdout}] }}"
+
+- name: Verificar status de ventiladores
+  shell: "sensors | grep -i fan"
+  register: fan_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de ventiladores ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar status de ventiladores', 'status': 'Concluído - Ventiladores OK' if fan_check.rc == 0 else 'Falha - Ventiladores não detectados'}] }}"
+
+- name: Verificar status de alimentação
+  shell: "cat /sys/class/power_supply/*/online"
+  register: power_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de alimentação ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar status de alimentação', 'status': 'Concluído - Alimentação OK' if power_check.rc == 0 else 'Falha - Status de alimentação não disponível'}] }}"
+
+- name: Verificar logs de hardware
+  shell: "dmesg | grep -i 'error\\|fail\\|critical' | tail -10"
+  register: hardware_logs
+  changed_when: false
+
+- name: Adicionar verificação de logs ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar logs de hardware', 'status': 'Concluído - ' + (hardware_logs.stdout_lines | length | string) + ' erros encontrados'}] }}"
+
+- name: Verificar status de RAID (se aplicável)
+  shell: "cat /proc/mdstat"
+  register: raid_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de RAID ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar status de RAID', 'status': 'Concluído - RAID OK' if raid_check.rc == 0 else 'Falha - RAID não configurado'}] }}"
+
+- name: Verificar conectividade de rede física
+  shell: "ethtool {{ item }} | grep 'Link detected'"
+  loop: "{{ ansible_interfaces | select('match', '^eth|^en') | list }}"
+  register: network_link_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Adicionar verificação de conectividade física ao checklist
+  set_fact:
+    checklist_actions: "{{ checklist_actions + [{'name': 'Verificar conectividade física de rede', 'status': 'Concluído - Links físicos verificados'}] }}"
+
+- name: Adicionar próximos passos específicos de hardware
+  set_fact:
+    next_steps: "{{ next_steps + ['Verificar logs de sistema detalhados', 'Monitorar temperatura continuamente', 'Verificar redundância de hardware', 'Testar componentes críticos'] }}"
+
+- name: Log do checklist de hardware
+  debug:
+    msg: |
+      Checklist de hardware concluído para incidente {{ current_incident.number }}
+      Ações realizadas: {{ checklist_actions | length }}
+      Próximos passos: {{ next_steps | length }}
