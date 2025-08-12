@@ -1,0 +1,147 @@
+---
+- name: Get New Tickets from ServiceNow (Optimized)
+  hosts: localhost
+  connection: local
+  vars:
+    # Configurações de filtro para tickets novos
+    new_ticket_threshold_hours: 24  # Buscar tickets das últimas 24h
+    max_results: 50  # Limitar número de resultados para performance
+  
+  tasks:
+    - name: Calculate timestamp for new tickets
+      set_fact:
+        new_ticket_timestamp: "{{ (ansible_date_time.epoch | int) - (new_ticket_threshold_hours * 3600) }}"
+    
+    - name: Convert timestamp to ServiceNow format
+      set_fact:
+        snow_timestamp: "{{ new_ticket_timestamp | int | strftime('%Y-%m-%d %H:%M:%S') }}"
+    
+    - name: Get new incidents via REST API
+      uri:
+        url: "https://{{ snow_instance }}/api/now/table/incident"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: yes
+        headers:
+          Accept: "application/json"
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_password }}"
+        validate_certs: yes
+        return_content: yes
+        # Query otimizada para buscar apenas incidentes novos
+        url_extra_params:
+          sysparm_query: "opened_at>={{ snow_timestamp }}^state=1^priorityIN1,2,3"
+          sysparm_limit: "{{ max_results }}"
+          sysparm_display_value: "true"
+          sysparm_exclude_reference_link: "true"
+          sysparm_fields: "number,short_description,priority,opened_at,caller_id,sys_id,state,category,impact,urgency"
+      register: new_incidents
+      retries: 3
+      delay: 5
+      until: new_incidents.status == 200
+    
+    - name: Get new change requests via REST API
+      uri:
+        url: "https://{{ snow_instance }}/api/now/table/change_request"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: yes
+        headers:
+          Accept: "application/json"
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_password }}"
+        validate_certs: yes
+        return_content: yes
+        # Query otimizada para buscar apenas changes novos
+        url_extra_params:
+          sysparm_query: "opened_at>={{ snow_timestamp }}^state=1^priorityIN1,2"
+          sysparm_limit: "{{ max_results }}"
+          sysparm_display_value: "true"
+          sysparm_exclude_reference_link: "true"
+          sysparm_fields: "number,short_description,priority,opened_at,caller_id,sys_id,state,category"
+      register: new_changes
+      retries: 3
+      delay: 5
+      until: new_changes.status == 200
+    
+    - name: Filter active new incidents
+      set_fact:
+        filtered_new_incidents: "{{ new_incidents.json.result | selectattr('state', 'equalto', '1') | list }}"
+    
+    - name: Filter active new changes
+      set_fact:
+        filtered_new_changes: "{{ new_changes.json.result | selectattr('state', 'equalto', '1') | list }}"
+    
+    - name: Display comprehensive summary
+      debug:
+        msg: |
+          📊 **Resumo de Tickets Novos - ServiceNow**
+          
+          🚨 **Incidentes**:
+          • Total encontrados: {{ new_incidents.json.result | length }}
+          • Novos ativos: {{ filtered_new_incidents | length }}
+          
+          📋 **Changes**:
+          • Total encontrados: {{ new_changes.json.result | length }}
+          • Novos ativos: {{ filtered_new_changes | length }}
+          
+          ⏰ **Período**: últimas {{ new_ticket_threshold_hours }} horas
+          📅 **Timestamp de busca**: {{ snow_timestamp }}
+          ⚡ **Performance**: {{ new_incidents.elapsed + new_changes.elapsed }}ms total
+    
+    - name: Display new incidents details
+      debug:
+        msg: |
+          🚨 **INCIDENTE**: {{ item.number }}
+          📝 **Descrição**: {{ item.short_description }}
+          🏷️ **Prioridade**: {{ item.priority }}
+          📅 **Aberto em**: {{ item.opened_at }}
+          👤 **Solicitante**: {{ item.caller_id }}
+          🏷️ **Categoria**: {{ item.category }}
+          ⚡ **Impacto**: {{ item.impact }}
+          🚨 **Urgência**: {{ item.urgency }}
+          🔗 **Link**: https://{{ snow_instance }}/nav_to.do?uri=incident.do?sys_id={{ item.sys_id }}
+      loop: "{{ filtered_new_incidents }}"
+      when: filtered_new_incidents | length > 0
+    
+    - name: Display new changes details
+      debug:
+        msg: |
+          📋 **CHANGE**: {{ item.number }}
+          📝 **Descrição**: {{ item.short_description }}
+          🏷️ **Prioridade**: {{ item.priority }}
+          📅 **Aberto em**: {{ item.opened_at }}
+          👤 **Solicitante**: {{ item.caller_id }}
+          🏷️ **Categoria**: {{ item.category }}
+          🔗 **Link**: https://{{ snow_instance }}/nav_to.do?uri=change_request.do?sys_id={{ item.sys_id }}
+      loop: "{{ filtered_new_changes }}"
+      when: filtered_new_changes | length > 0
+    
+    - name: No new tickets found
+      debug:
+        msg: "✅ Nenhum ticket novo encontrado nas últimas {{ new_ticket_threshold_hours }} horas"
+      when: 
+        - filtered_new_incidents | length == 0 and 
+        - filtered_new_changes | length == 0
+    
+    - name: Performance metrics
+      debug:
+        msg: |
+          ⚡ **Métricas de Performance Detalhadas**
+          
+          📊 **Incidentes**:
+          • Tempo de resposta: {{ new_incidents.elapsed }}ms
+          • Registros retornados: {{ new_incidents.json.result | length }}
+          • Tamanho da resposta: {{ new_incidents.json | length }} bytes
+          
+          📊 **Changes**:
+          • Tempo de resposta: {{ new_changes.elapsed }}ms
+          • Registros retornados: {{ new_changes.json.result | length }}
+          • Tamanho da resposta: {{ new_changes.json | length }} bytes
+          
+          📈 **Total**:
+          • Tempo total: {{ new_incidents.elapsed + new_changes.elapsed }}ms
+          • Registros totais: {{ new_incidents.json.result | length + new_changes.json.result | length }}
+          • Status: ✅ Sucesso

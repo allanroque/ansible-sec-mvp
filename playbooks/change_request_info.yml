@@ -13,6 +13,7 @@
           host: "{{ snow_instance }}"
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
+        sysparm_query: "state!=closed"
       register: result
 
     - name: Print change request info

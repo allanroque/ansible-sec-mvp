@@ -1,0 +1,19 @@
+# Configurações ServiceNow
+snow_instance: "your-instance.service-now.com"
+snow_username: "{{ lookup('env', 'SNOW_USERNAME') | default('your-username') }}"
+snow_password: "{{ lookup('env', 'SNOW_PASSWORD') | default('your-password') }}"
+
+# Configurações de Performance
+new_ticket_threshold_hours: 24
+max_results: 50
+retry_attempts: 3
+retry_delay: 5
+
+# Configurações de Filtro
+incident_priorities: ["1", "2", "3"]
+change_priorities: ["1", "2"]
+active_state: "1"
+
+# Configurações de Log
+log_level: "INFO"
+log_file: "/var/log/ansible/servicenow_monitor.log"
