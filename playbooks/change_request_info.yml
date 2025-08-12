@@ -1,0 +1,20 @@
+---
+- name: Close Change Request in ServiceNow
+  hosts: localhost
+  connection: local
+  vars:
+  collections:
+    - servicenow.itsm
+
+  tasks:
+    - name: Close change request
+      servicenow.itsm.change_request_info:
+        instance:
+          host: "{{ snow_instance }}"
+          username: "{{ snow_username }}"
+          password: "{{ snow_password }}"
+        register: result
+
+    - name: Print change request info
+      ansible.builtin.debug:
+        var: result
