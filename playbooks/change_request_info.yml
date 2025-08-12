@@ -13,7 +13,7 @@
           host: "{{ snow_instance }}"
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
-        register: result
+      register: result
 
     - name: Print change request info
       ansible.builtin.debug:
