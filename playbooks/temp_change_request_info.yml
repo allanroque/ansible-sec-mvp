@@ -264,15 +264,36 @@
           near_breach:                "{{ near_breach                 | map(attribute='number') | list }}"
           violadas_stale:             "{{ violadas_stale              | map(attribute='number') | list }}"
 
-    - name: Mensagem pronta (resumo para Chat)
+    # --- Sessão de contagem (length) ---
+    - name: Construir texto de contagem (resumo)
+      set_fact:
+        counts_text: |-
+          *Contagem (resumo)*
+          - Tickets novos e sem owner (≤ {{ window_minutes_new }} min): {{ novos_sem_owner | length }}
+          - Tickets abertos e sem owner (≥ {{ ownerless_hours }} h): {{ velhos_sem_owner | length }}
+          - Ticket sem atualização (SEM owner) ≥ {{ stale_hours }} h: {{ sem_atualizacao_sem_owner | length }}
+          - Sem atualização (COM owner) ≥ {{ stale_hours }} h: {{ sem_atualizacao_com_owner | length }}
+          - SLA próximo (≤ {{ near_breach_minutes }} min): {{ near_breach | length }}
+          - Violadas + sem update ≥ {{ stale_hours }} h: {{ violadas_stale | length }}
+
+    - name: Exibir contagem (apenas debug)
+      debug:
+        var: counts_text
+
+    # --- Opcional: incorporar a contagem no texto que já será enviado ao Chat ---
+    - name: Montar mensagem final com contagem + listas
       set_fact:
         chat_text: |-
+          {{ counts_text }}
+
           *Novos e sem owner (≤ {{ window_minutes_new }} min):* {{ novos_sem_owner | map(attribute='number') | list }}
           *Velhos sem owner (≥ {{ ownerless_hours }} h):* {{ velhos_sem_owner | map(attribute='number') | list }}
           *Sem atualização (SEM owner) ≥ {{ stale_hours }} h:* {{ sem_atualizacao_sem_owner | map(attribute='number') | list }}
           *Sem atualização (COM owner) ≥ {{ stale_hours }} h:* {{ sem_atualizacao_com_owner | map(attribute='number') | list }}
           *SLA próximo (≤ {{ near_breach_minutes }} min):* {{ near_breach | map(attribute='number') | list }}
           *Violadas + sem update ≥ {{ stale_hours }} h:* {{ violadas_stale | map(attribute='number') | list }}
+
+
 
     - name: Pré-visualizar mensagem
       debug:
