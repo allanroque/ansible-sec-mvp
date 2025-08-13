@@ -1,21 +1,21 @@
 ---
-- name: Close Change Request in ServiceNow
+- name: Changes abertas (não-fechadas)
   hosts: localhost
   connection: local
-  vars:
+  gather_facts: false
   collections:
     - servicenow.itsm
 
   tasks:
-    - name: Close change request
+    - name: Buscar changes ativas e não-fechadas
       servicenow.itsm.change_request_info:
         instance:
           host: "{{ snow_instance }}"
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
-        sysparm_query: "state!=closed"
+        sysparm_query: "active=true^state!=closed"
+        sysparm_display_value: "true"
       register: result
 
-    - name: Print change request info
-      ansible.builtin.debug:
-        var: result
+    - debug:
+        var: result.records
