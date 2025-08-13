@@ -1,69 +1,193 @@
 ---
-- name: Classificar tickets por buckets
+- name: Buckets offline (Novos/Velhos sem owner + Sem atualização com/sem owner)
   hosts: localhost
-  gather_facts: no
+  connection: local
+  gather_facts: false
+
   vars:
-    offline_mode: true  # false = busca task_sla
-    now: "{{ lookup('pipe', 'date +%s') | int }}"
-    fifteen_minutes: 900
-    twenty_four_hours: 86400
+    # Limiares ajustáveis
+    window_minutes_new: 15    # "novos" = abertos nos últimos X minutos
+    ownerless_hours: 24       # "velhos sem owner" = abertos há >= X horas sem owner
+    stale_hours: 24           # "sem atualização" = sem update há >= X horas
+
+  # Seu arquivo com a coleta anterior (mesma estrutura que você já usa)
+  vars_files:
+    - "vars.yml"    # deve conter: records: [...]
+
+  pre_tasks:
+    - name: Validar 'records' do vars.yml
+      assert:
+        that:
+          - records is defined
+          - records | type_debug == 'list'
+        fail_msg: "Esperava 'records' como lista em vars.yml."
 
   tasks:
-    - name: Carregar tickets
+    - name: Epoch atual (UTC)
       set_fact:
-        tickets: "{{ lookup('file', 'tickets.json') | from_json }}"
+        now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
 
-    - name: Classificar tickets
+    - name: Normalizar lista de changes
       set_fact:
-        bucket_novos_sem_owner: "{{ bucket_novos_sem_owner | default([]) }}"
-        bucket_sla_proximo: "{{ bucket_sla_proximo | default([]) }}"
-        bucket_violados_sem_update: "{{ bucket_violados_sem_update | default([]) }}"
-        bucket_sem_update: "{{ bucket_sem_update | default([]) }}"
+        chg_all: "{{ records | default([]) }}"
 
-    - name: Processar tickets
+    - name: Inicializar buckets
       set_fact:
-        bucket_novos_sem_owner: >-
-          {{ bucket_novos_sem_owner + [item] if (
-            (now - (item.opened_at | to_datetime('%Y-%m-%d %H:%M:%S') | to_datetime | to_timestamp)) <= fifteen_minutes
-            and (item.assigned_to | length == 0)
-          ) or (
-            (now - (item.opened_at | to_datetime('%Y-%m-%d %H:%M:%S') | to_datetime | to_timestamp)) >= twenty_four_hours
-            and (item.assigned_to | length == 0)
-          )
-          else bucket_novos_sem_owner }}
-        bucket_sla_proximo: >-
-          {{ bucket_sla_proximo + [item] if (
-            not offline_mode
-              and item.sla_time_remaining is defined and item.sla_time_remaining <= fifteen_minutes
-          ) or (
-            offline_mode
-              and (item.sla_due | length > 0)
-              and ((item.sla_due | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) - now) <= fifteen_minutes
-              and ((item.sla_due | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) - now) > 0
-          )
-          else bucket_sla_proximo }}
-        bucket_violados_sem_update: >-
-          {{ bucket_violados_sem_update + [item] if (
-            not offline_mode
-              and item.sla_status == 'Breached'
-              and (now - (item.sys_updated_on | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp)) >= twenty_four_hours
-          ) or (
-            offline_mode
-              and (item.sla_due | length > 0)
-              and (item.sla_due | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) < now
-              and (now - (item.sys_updated_on | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp)) >= twenty_four_hours
-          )
-          else bucket_violados_sem_update }}
-        bucket_sem_update: >-
-          {{ bucket_sem_update + [item] if (
-            now - (item.sys_updated_on | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) >= twenty_four_hours
-          ) else bucket_sem_update }}
-      loop: "{{ tickets }}"
+        novos_sem_owner: []
+        velhos_sem_owner: []
+        sem_atualizacao_sem_owner: []
+        sem_atualizacao_com_owner: []
 
-    - name: Exibir resultados
+    # --------- 1) Novos e sem owner (≤ window_minutes_new) ---------
+    - name: Classificar "Novos e sem owner"
+      set_fact:
+        novos_sem_owner: "{{ novos_sem_owner + [ novo_reg ] }}"
+      vars:
+        opened_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('') ) | quote ) ~ ' +%s') | int)
+              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
+          }}
+        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
+        sem_owner: >-
+          {{ (item.assigned_to is not defined) or ((item.assigned_to | string | trim) == '') }}
+        novo_reg: >-
+          {{
+            {
+              'number': item.number,
+              'sys_id': item.sys_id,
+              'short_description': item.short_description | default(''),
+              'opened_at': item.opened_at | default(''),
+              'minutes_open': ((delta_open_sec | int) // 60) | int
+            }
+          }}
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - opened_epoch | int > 0
+        - sem_owner
+        - (delta_open_sec | int) <= (window_minutes_new | int) * 60
+
+    # --------- 1b) Velhos sem owner (≥ ownerless_hours) -----------
+    - name: Classificar "Velhos sem owner" (abertos há >= ownerless_hours)
+      set_fact:
+        velhos_sem_owner: "{{ velhos_sem_owner + [ velho_reg ] }}"
+      vars:
+        opened_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('') ) | quote ) ~ ' +%s') | int)
+              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
+          }}
+        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
+        sem_owner: >-
+          {{ (item.assigned_to is not defined) or ((item.assigned_to | string | trim) == '') }}
+        velho_reg: >-
+          {{
+            {
+              'number': item.number,
+              'sys_id': item.sys_id,
+              'short_description': item.short_description | default(''),
+              'opened_at': item.opened_at | default(''),
+              'hours_open': ((delta_open_sec | int) // 3600) | int
+            }
+          }}
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - opened_epoch | int > 0
+        - sem_owner
+        - (delta_open_sec | int) >= (ownerless_hours | int) * 3600
+
+    # --------- 2) Sem atualização ≥ stale_hours (sem owner) --------
+    - name: Classificar "Sem atualização (sem owner) >= stale_hours"
+      set_fact:
+        sem_atualizacao_sem_owner: "{{ sem_atualizacao_sem_owner + [ stale_reg ] }}"
+      vars:
+        updated_epoch: >-
+          {{
+            (lookup('pipe','date -u -d ' ~ ( (item.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
+              if (item.sys_updated_on is defined and (item.sys_updated_on | string | length) > 0) else 0
+          }}
+        delta_update_sec: "{{ (now_epoch | int) - (updated_epoch | int) }}"
+        sem_owner: >-
+          {{ (item.assigned_to is not defined) or ((item.assigned_to | string | trim) == '') }}
+        stale_reg: >-
+          {{
+            {
+              'number': item.number,
+              'sys_id': item.sys_id,
+              'short_description': item.short_description | default(''),
+              'last_update': item.sys_updated_on | default(''),
+              'hours_since_update': ((delta_update_sec | int) // 3600) | int
+            }
+          }}
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - updated_epoch | int > 0
+        - sem_owner
+        - (delta_update_sec | int) >= (stale_hours | int) * 3600
+
+    # --------- 3) Sem atualização ≥ stale_hours (com owner) --------
+    - name: Classificar "Sem atualização (com owner) >= stale_hours"
+      set_fact:
+        sem_atualizacao_com_owner: "{{ sem_atualizacao_com_owner + [ stale_reg ] }}"
+      vars:
+        updated_epoch: >-
+          {{
+            (lookup('pipe','date -u -d ' ~ ( (item.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
+              if (item.sys_updated_on is defined and (item.sys_updated_on | string | length) > 0) else 0
+          }}
+        delta_update_sec: "{{ (now_epoch | int) - (updated_epoch | int) }}"
+        tem_owner: >-
+          {{ (item.assigned_to is defined) and ((item.assigned_to | string | trim) != '') }}
+        stale_reg: >-
+          {{
+            {
+              'number': item.number,
+              'sys_id': item.sys_id,
+              'assigned_to': item.assigned_to | default(''),
+              'short_description': item.short_description | default(''),
+              'last_update': item.sys_updated_on | default(''),
+              'hours_since_update': ((delta_update_sec | int) // 3600) | int
+            }
+          }}
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - updated_epoch | int > 0
+        - tem_owner
+        - (delta_update_sec | int) >= (stale_hours | int) * 3600
+
+    # ------------------ Saídas / Resumo ------------------
+    - name: Contagens por bucket
       debug:
         msg:
-          - "Novos e sem owner: {{ bucket_novos_sem_owner | length }}"
-          - "SLA próximo de violar: {{ bucket_sla_proximo | length }}"
-          - "Violados + sem atualização ≥ 24h: {{ bucket_violados_sem_update | length }}"
-          - "Sem atualização (parados): {{ bucket_sem_update | length }}"
+          - "Novos e sem owner (≤ {{ window_minutes_new }} min): {{ novos_sem_owner | length }}"
+          - "Velhos sem owner (≥ {{ ownerless_hours }} h): {{ velhos_sem_owner | length }}"
+          - "Sem atualização (SEM owner) ≥ {{ stale_hours }} h: {{ sem_atualizacao_sem_owner | length }}"
+          - "Sem atualização (COM owner) ≥ {{ stale_hours }} h: {{ sem_atualizacao_com_owner | length }}"
+
+    - name: Listas de números por bucket
+      debug:
+        msg:
+          novos_sem_owner:            "{{ novos_sem_owner             | map(attribute='number') | list }}"
+          velhos_sem_owner:           "{{ velhos_sem_owner            | map(attribute='number') | list }}"
+          sem_atualizacao_sem_owner:  "{{ sem_atualizacao_sem_owner   | map(attribute='number') | list }}"
+          sem_atualizacao_com_owner:  "{{ sem_atualizacao_com_owner   | map(attribute='number') | list }}"
+
+    - name: Mensagem pronta (resumo para Chat)
+      set_fact:
+        chat_text: |-
+          *Novos e sem owner (≤ {{ window_minutes_new }} min):* {{ novos_sem_owner | map(attribute='number') | list }}
+          *Velhos sem owner (≥ {{ ownerless_hours }} h):* {{ velhos_sem_owner | map(attribute='number') | list }}
+          *Sem atualização (SEM owner) ≥ {{ stale_hours }} h:* {{ sem_atualizacao_sem_owner | map(attribute='number') | list }}
+          *Sem atualização (COM owner) ≥ {{ stale_hours }} h:* {{ sem_atualizacao_com_owner | map(attribute='number') | list }}
+
+    - name: Pré-visualizar mensagem
+      debug:
+        var: chat_text
