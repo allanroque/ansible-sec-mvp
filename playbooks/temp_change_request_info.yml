@@ -12,6 +12,19 @@
   vars_files: "vars.yml"
 
   pre_tasks:
+
+    - name: Conferir chaves de topo do vars.yml
+      debug:
+        msg: "{{ vars | dict2items | map(attribute='key') | list | difference(['groups','hostvars']) | sort }}"
+
+    - name: Tamanho de abertas.records (se existir)
+      debug:
+        msg: "abertas.records length = {{ (abertas.records | length) if (abertas is defined and abertas.records is defined) else 'N/A' }}"
+
+    - name: Tamanho de records (se existir)
+      debug:
+        msg: "records length = {{ (records | length) if (records is defined) else 'N/A' }}"
+
     - name: Validar estrutura de entrada
       assert:
         that:
