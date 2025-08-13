@@ -1,337 +1,69 @@
 ---
-- name: Buckets (Novos sem owner, SLA perto, Violadas + 24h sem update) - modo híbrido
+- name: Classificar tickets por buckets
   hosts: localhost
-  connection: local
-  gather_facts: false
-
+  gather_facts: no
   vars:
-    # Limiares
-    window_minutes_new: 15     # "novos e sem owner" = abertas nos últimos X minutos
-    near_breach_minutes: 60    # SLA expira em <= X minutos
-    stale_hours: 24            # Sem atualização há >= X horas (para violadas)
-
-    # Controle de modo ONLINE (task_sla). OFFLINE = false.
-    use_task_sla_api: false
-
-    # Credenciais / instância (exigidas somente se use_task_sla_api = true)
-    snow_instance: "{{ host | default(omit) }}"   # ex.: https://SEU_INSTANCE.service-now.com
-    snow_username: "{{ username | default(omit) }}"
-    snow_password: "{{ password | default(omit) }}"
-
-  # O vars.yml deve conter pelo menos: records: [...]
-  vars_files:
-    - "vars.yml"
-
-  pre_tasks:
-    - name: Validar 'records' (changes)
-      assert:
-        that:
-          - records is defined
-          - records | type_debug == 'list'
-        fail_msg: "Esperava 'records' como lista em vars.yml."
+    offline_mode: true  # false = busca task_sla
+    now: "{{ lookup('pipe', 'date +%s') | int }}"
+    fifteen_minutes: 900
+    twenty_four_hours: 86400
 
   tasks:
-    # ====== Base temporal ======
-    - name: Agora (UTC epoch)
+    - name: Carregar tickets
       set_fact:
-        now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
+        tickets: "{{ lookup('file', 'tickets.json') | from_json }}"
 
-    # ====== Normalizações ======
-    - name: Normalizar CHGs e mapas úteis
+    - name: Classificar tickets
       set_fact:
-        chg_all: "{{ records | default([]) }}"
-        map_sysid_to_number: >-
-          {{
-            dict(
-              (records | map(attribute='sys_id')   | list)
-              | zip(records | map(attribute='number') | list)
-            )
-          }}
-        map_number_to_sysid: >-
-          {{
-            dict(
-              (records | map(attribute='number') | list)
-              | zip(records | map(attribute='sys_id')   | list)
-            )
-          }}
+        bucket_novos_sem_owner: "{{ bucket_novos_sem_owner | default([]) }}"
+        bucket_sla_proximo: "{{ bucket_sla_proximo | default([]) }}"
+        bucket_violados_sem_update: "{{ bucket_violados_sem_update | default([]) }}"
+        bucket_sem_update: "{{ bucket_sem_update | default([]) }}"
 
-    - name: Extrair sys_ids das CHGs (para query task_sla)
+    - name: Processar tickets
       set_fact:
-        chg_sys_ids: "{{ records | map(attribute='sys_id') | list }}"
-        chg_numbers: "{{ records | map(attribute='number') | list }}"
+        bucket_novos_sem_owner: >-
+          {{ bucket_novos_sem_owner + [item] if (
+            (now - (item.opened_at | to_datetime('%Y-%m-%d %H:%M:%S') | to_datetime | to_timestamp)) <= fifteen_minutes
+            and (item.assigned_to | length == 0)
+          ) or (
+            (now - (item.opened_at | to_datetime('%Y-%m-%d %H:%M:%S') | to_datetime | to_timestamp)) >= twenty_four_hours
+            and (item.assigned_to | length == 0)
+          )
+          else bucket_novos_sem_owner }}
+        bucket_sla_proximo: >-
+          {{ bucket_sla_proximo + [item] if (
+            not offline_mode
+              and item.sla_time_remaining is defined and item.sla_time_remaining <= fifteen_minutes
+          ) or (
+            offline_mode
+              and (item.sla_due | length > 0)
+              and ((item.sla_due | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) - now) <= fifteen_minutes
+              and ((item.sla_due | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) - now) > 0
+          )
+          else bucket_sla_proximo }}
+        bucket_violados_sem_update: >-
+          {{ bucket_violados_sem_update + [item] if (
+            not offline_mode
+              and item.sla_status == 'Breached'
+              and (now - (item.sys_updated_on | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp)) >= twenty_four_hours
+          ) or (
+            offline_mode
+              and (item.sla_due | length > 0)
+              and (item.sla_due | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) < now
+              and (now - (item.sys_updated_on | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp)) >= twenty_four_hours
+          )
+          else bucket_violados_sem_update }}
+        bucket_sem_update: >-
+          {{ bucket_sem_update + [item] if (
+            now - (item.sys_updated_on | to_datetime('%Y-%m-%d %H:%M:%S') | to_timestamp) >= twenty_four_hours
+          ) else bucket_sem_update }}
+      loop: "{{ tickets }}"
 
-    # ====== (ONLINE) Buscar task_sla se habilitado ======
-    - name: Aviso — Modo OFFLINE, não buscarei task_sla
-      debug:
-        msg: "use_task_sla_api=false → buckets de SLA usarão apenas sla_due/made_sla/sys_updated_on."
-      when: not use_task_sla_api
-
-    - name: (ONLINE) Consultar task_sla para as CHGs coletadas
-      uri:
-        url: >-
-          {{ snow_instance }}/api/now/table/task_sla?
-          sysparm_query=taskIN{{ chg_sys_ids | join(',') }}&
-          sysparm_display_value=true&
-          sysparm_limit=10000
-        method: GET
-        user: "{{ snow_username }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: true
-        validate_certs: true
-        return_content: true
-      register: slas_query
-      when:
-        - use_task_sla_api
-        - snow_instance is defined
-        - snow_username is defined
-        - snow_password is defined
-        - chg_sys_ids | length > 0
-
-    - name: Normalizar SLAs da API (ou lista vazia)
-      set_fact:
-        slas_api: "{{ (slas_query.json.result | default([])) if (slas_query is defined and slas_query.json is defined) else [] }}"
-
-    - name: Mostrar contagem de SLAs vindos da API (se houver)
-      debug:
-        msg: "task_sla retornados: {{ slas_api | length }}"
-      when: use_task_sla_api
-
-    # ====== Buckets ======
-    - name: Inicializar buckets
-      set_fact:
-        novos_sem_owner: []
-        near_breach: []
-        violadas_stale: []
-
-    # ---- 1) Novos e sem tratamento (sempre funciona) ----
-    - name: Classificar "Novos e sem owner"
-      set_fact:
-        novos_sem_owner: "{{ novos_sem_owner + [ novo_reg ] }}"
-      vars:
-        opened_epoch: >-
-          {{ (lookup('pipe', 'date -u -d ' ~ (item.opened_at | quote) ~ ' +%s') | int)
-              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0 }}
-        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
-        minutos_aberto: "{{ (delta_open_sec // 60) | int }}"
-        sem_owner: >-
-          {{ (item.assigned_to is not defined) or ((item.assigned_to | string | trim) == '') }}
-        novo_reg: >-
-          {{
-            {
-              'number': item.number,
-              'sys_id': item.sys_id,
-              'short_description': item.short_description | default(''),
-              'opened_at': item.opened_at | default(''),
-              'minutes_open': minutos_aberto | int
-            }
-          }}
-      loop: "{{ chg_all }}"
-      loop_control:
-        label: "{{ item.number | default('sem-number') }}"
-      when:
-        - item.opened_at is defined
-        - (item.opened_at | string | length) > 0
-        - sem_owner
-        - delta_open_sec | int <= (window_minutes_new | int) * 60
-
-    # ---- 2) SLA próximo de violar ----
-    # 2A) Modo ONLINE com task_sla
-    - name: (ONLINE) Classificar "SLA próximo de violar" usando task_sla
-      set_fact:
-        near_breach: "{{ (near_breach + [ nb_reg ]) | unique }}"
-      vars:
-        chg_num_from_sla: >-
-          {{
-            ( item.task.number | default('') )
-              if (item.task is mapping)
-              else ( map_sysid_to_number[item.task] if (item.task is string and item.task in map_sysid_to_number) else '' )
-          }}
-        planned_end_epoch: >-
-          {{
-            (lookup('pipe', 'date -u -d ' ~ ( (item.planned_end_time | default('') ) | quote ) ~ ' +%s') | int)
-              if (item.planned_end_time is defined and (item.planned_end_time | string | length) > 0)
-              else 0
-          }}
-        has_breached_bool: >-
-          {{
-            (item.has_breached)
-              if (item.has_breached is boolean)
-              else ((item.has_breached | default('false') | string | lower) == 'true')
-          }}
-        time_left_sec: "{{ (planned_end_epoch | int) - (now_epoch | int) }}"
-        nb_reg: >-
-          {{
-            {
-              'number': chg_num_from_sla,
-              'minutes_left': (time_left_sec // 60) | int,
-              'planned_end_time': item.planned_end_time | default('')
-            }
-          }}
-      loop: "{{ slas_api }}"
-      loop_control:
-        label: >-
-          {{
-            item.task.number | default(item.task | default('sem-task'))
-              if (item.task is defined) else 'sem-task'
-          }}
-      when:
-        - use_task_sla_api
-        - slas_api | length > 0
-        - has_breached_bool == false
-        - planned_end_epoch | int > 0
-        - time_left_sec | int >= 0
-        - time_left_sec | int <= (near_breach_minutes | int) * 60
-        - chg_num_from_sla | length > 0
-
-    # 2B) Modo OFFLINE (sem task_sla): usa somente sla_due
-    - name: (OFFLINE) Classificar "SLA próximo de violar" usando sla_due da Change
-      set_fact:
-        near_breach: "{{ (near_breach + [ nb_reg ]) | unique }}"
-      vars:
-        due_epoch: >-
-          {{
-            (lookup('pipe', 'date -u -d ' ~ ( (item.sla_due | default('') ) | quote ) ~ ' +%s') | int)
-              if (item.sla_due is defined and (item.sla_due | string | length) > 0)
-              else 0
-          }}
-        time_left_sec: "{{ (due_epoch | int) - (now_epoch | int) }}"
-        nb_reg: >-
-          {{
-            {
-              'number': item.number,
-              'minutes_left': (time_left_sec // 60) | int,
-              'sla_due': item.sla_due | default('')
-            }
-          }}
-      loop: "{{ chg_all }}"
-      loop_control:
-        label: "{{ item.number | default('sem-number') }}"
-      when:
-        - (not use_task_sla_api) or (slas_api | length == 0)
-        - item.sla_due is defined
-        - (item.sla_due | string | length) > 0
-        - time_left_sec | int >= 0
-        - time_left_sec | int <= (near_breach_minutes | int) * 60
-
-    # ---- 3) Violadas + sem atualização ≥ Xh ----
-    # 3A) Modo ONLINE com task_sla (usa has_breached + sys_updated_on da Change)
-    - name: (ONLINE) Classificar "Violadas e sem atualização há >= {{ stale_hours }}h"
-      set_fact:
-        violadas_stale: "{{ (violadas_stale + [ vs_reg ]) | unique }}"
-      vars:
-        chg_num_from_sla: >-
-          {{
-            ( item.task.number | default('') )
-              if (item.task is mapping)
-              else ( map_sysid_to_number[item.task] if (item.task is string and item.task in map_sysid_to_number) else '' )
-          }}
-        chg_sysid_from_sla: >-
-          {{
-            ( item.task.sys_id | default('') )
-              if (item.task is mapping)
-              else ( item.task | default('') )
-          }}
-        chg_obj: "{{ (chg_all | selectattr('sys_id','equalto', chg_sysid_from_sla) | list | first) | default({}) }}"
-        updated_epoch: >-
-          {{
-            (lookup('pipe','date -u -d ' ~ ( (chg_obj.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
-              if (chg_obj.sys_updated_on is defined and (chg_obj.sys_updated_on | string | length) > 0)
-              else 0
-          }}
-        has_breached_bool: >-
-          {{
-            (item.has_breached)
-              if (item.has_breached is boolean)
-              else ((item.has_breached | default('false') | string | lower) == 'true')
-          }}
-        hours_since_update: "{{ ((now_epoch | int) - (updated_epoch | int)) // 3600 }}"
-        vs_reg: >-
-          {{
-            {
-              'number': chg_num_from_sla,
-              'last_update': chg_obj.sys_updated_on | default(''),
-              'hours_since_update': hours_since_update | int
-            }
-          }}
-      loop: "{{ slas_api }}"
-      loop_control:
-        label: >-
-          {{
-            item.task.number | default(item.task | default('sem-task'))
-              if (item.task is defined) else 'sem-task'
-          }}
-      when:
-        - use_task_sla_api
-        - slas_api | length > 0
-        - has_breached_bool == true
-        - updated_epoch | int > 0
-        - ((now_epoch | int) - (updated_epoch | int)) >= (stale_hours | int) * 3600
-        - chg_num_from_sla | length > 0
-
-    # 3B) Modo OFFLINE (sem task_sla): inferir violação por sla_due ultrapassado + stale
-    - name: (OFFLINE) Classificar "Violadas e sem atualização há >= {{ stale_hours }}h" usando sla_due
-      set_fact:
-        violadas_stale: "{{ (violadas_stale + [ vs_reg ]) | unique }}"
-      vars:
-        due_epoch: >-
-          {{
-            (lookup('pipe', 'date -u -d ' ~ ( (item.sla_due | default('') ) | quote ) ~ ' +%s') | int)
-              if (item.sla_due is defined and (item.sla_due | string | length) > 0)
-              else 0
-          }}
-        updated_epoch: >-
-          {{
-            (lookup('pipe','date -u -d ' ~ ( (item.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
-              if (item.sys_updated_on is defined and (item.sys_updated_on | string | length) > 0)
-              else 0
-          }}
-        time_left_sec: "{{ (due_epoch | int) - (now_epoch | int) }}"
-        hours_since_update: "{{ ((now_epoch | int) - (updated_epoch | int)) // 3600 }}"
-        # Heurística OFFLINE: "violado" se sla_due passado OU (sla_due vazio e ticket antigo)
-        violated_offline: >-
-          {{
-            (due_epoch | int > 0 and time_left_sec | int < 0)
-          }}
-        vs_reg: >-
-          {{
-            {
-              'number': item.number,
-              'sla_due': item.sla_due | default(''),
-              'last_update': item.sys_updated_on | default(''),
-              'hours_since_update': hours_since_update | int
-            }
-          }}
-      loop: "{{ chg_all }}"
-      loop_control:
-        label: "{{ item.number | default('sem-number') }}"
-      when:
-        - (not use_task_sla_api) or (slas_api | length == 0)
-        - updated_epoch | int > 0
-        - hours_since_update | int >= (stale_hours | int)
-        - violated_offline
-
-    # ====== Saídas ======
-    - name: Contagens por bucket
+    - name: Exibir resultados
       debug:
         msg:
-          - "Novos e sem owner (<= {{ window_minutes_new }} min): {{ novos_sem_owner | length }}"
-          - "SLA próximo (<= {{ near_breach_minutes }} min): {{ near_breach | length }}"
-          - "Violadas + sem update >= {{ stale_hours }}h: {{ violadas_stale | length }}"
-
-    - name: Listas de números por bucket
-      debug:
-        msg:
-          novos_sem_owner: "{{ novos_sem_owner | map(attribute='number') | list }}"
-          near_breach:     "{{ near_breach     | map(attribute='number') | list }}"
-          violadas_stale:  "{{ violadas_stale  | map(attribute='number') | list }}"
-
-    - name: Mensagem pronta (resumo para Chat)
-      set_fact:
-        chat_text: |-
-          *Novos e sem owner (<= {{ window_minutes_new }} min):* {{ novos_sem_owner | map(attribute='number') | list }}
-          *SLA próximo (<= {{ near_breach_minutes }} min):* {{ near_breach | map(attribute='number') | list }}
-          *Violadas + sem update >= {{ stale_hours }}h:* {{ violadas_stale | map(attribute='number') | list }}
-
-    - name: Pré-visualizar mensagem
-      debug:
-        var: chat_text
+          - "Novos e sem owner: {{ bucket_novos_sem_owner | length }}"
+          - "SLA próximo de violar: {{ bucket_sla_proximo | length }}"
+          - "Violados + sem atualização ≥ 24h: {{ bucket_violados_sem_update | length }}"
+          - "Sem atualização (parados): {{ bucket_sem_update | length }}"
