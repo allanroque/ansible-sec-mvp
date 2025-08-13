@@ -1,25 +1,32 @@
 ---
-- name: Changes abertas (não-fechadas)
+- name: Changes abertas + resumo (número, estado, horas sem update)
   hosts: localhost
   connection: local
   gather_facts: false
   collections:
     - servicenow.itsm
 
+  vars:
+    snow_instance:
+      host: "{{ snow_instance }}"
+      username: "{{ snow_username }}"
+      password: "{{ snow_password }}"
+
   tasks:
-    - name: Buscar changes ativas e não-fechadas
+    - name: Buscar todas as changes abertas (phase_state=open)
       servicenow.itsm.change_request_info:
         instance:
           host: "{{ snow_instance }}"
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
-        sysparm_query: "active=true^phase_state=Open"
-#        sysparm_query: "active=true^stateINNew,Assess,Authorize,Scheduled,Implement,Review,Pending"
-        sysparm_display_value: "true"
-      register: result
+        # usamos o valor "interno" (cru) que você mostrou: phase_state: open (minúsculo)
+        sysparm_query: "active=true^phase_state=open"
+        sysparm_display_value: "true"     # estado legível na saída
+      register: abertas
 
-#    - debug:
-#        var: result.records
+    - name: Quantidade encontrada
+      debug:
+        msg: "Total de changes abertas encontradas: {{ abertas.records | length }}"
 
     - name: Epoch atual (segundos)
       set_fact:
@@ -41,21 +48,17 @@
               'is_new': ((item.state | string) | lower == 'new')
             } ] }}
       loop: "{{ abertas.records | default([]) }}"
+      when: (abertas.records | length) > 0
+      loop_control:
+        label: "{{ item.number }}"
 
-      # Fallback (se sua versão não tiver to_datetime/to_timestamp):
-      # vars:
-      #   upd_epoch_cmd: "{{ 'date -u -d \"%s\" +%s' | format(item.sys_updated_on) }}"
-      # set_fact:
-      #   resumo_changes: "{{ (resumo_changes | default([])) + [ {
-      #     'number': item.number,
-      #     'state': (item.state | string),
-      #     'horas_sem_update': ((now_epoch - (lookup('pipe', upd_epoch_cmd) | int)) // 3600) | int,
-      #     'is_new': ((item.state | string) | lower == 'new')
-      #   } ] }}"
-
-    - name: Mensagem formatada (uma linha por change)
+    - name: Mensagem formatada (uma linha por change) - ou mensagem vazia
       debug:
-        msg: |-
-          {% for r in resumo_changes | default([]) %}
+        msg: >-
+          {% if (resumo_changes | default([])) | length == 0 -%}
+          Nenhuma change aberta encontrada com o filtro (active=true AND phase_state=open).
+          {%- else -%}
+          {% for r in resumo_changes %}
           - {{ "%-10s"|format(r.number) }} | state={{ "%-8s"|format(r.state) }} | {{ "%4dh"%(r.horas_sem_update) }} sem atualização{% if r.is_new %} | NEW{% endif %}
           {% endfor %}
+          {%- endif %}
