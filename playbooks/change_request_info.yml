@@ -7,42 +7,129 @@
     - servicenow.itsm
 
   vars:
-    snow_instance:
-      host: "{{ snow_instance }}"
-      username: "{{ snow_username }}"
-      password: "{{ snow_password }}"
+    # Credenciais/instância (use credencial no AAP)
+    host: "{{ snow_instance }}"
+    username: "{{ snow_username }}"
+    password: "{{ snow_password }}"
+
+    # Janelas/limiares
+    window_minutes_new: 15   # janela para "novas"
+    stale_hours: 24          # sem update >= Xh
+    near_breach_minutes: 60  # SLA vence em <= X min
+
 
   tasks:
-    - name: Buscar todas as changes abertas (phase_state=open)
+    # 1) UMA consulta: changes abertas
+    - name: Buscar changes abertas (phase_state=open)
       servicenow.itsm.change_request_info:
-        instance:
-          host: "{{ snow_instance }}"
-          username: "{{ snow_username }}"
-          password: "{{ snow_password }}"
+        instance: "{{ snow_instance }}"
         sysparm_query: "active=true^phase_state=open"
         sysparm_display_value: "true"
       register: abertas
 
-    - name: Quantidade encontrada
-      debug:
-        msg: "Total de changes abertas encontradas: {{ abertas.records | length }}"
-
-    - name: Mostrar apenas a lista de números
-      debug:
-        msg: "{{ abertas.records | map(attribute='number') | list }}"
-
-    - name: Guardar lista de números
+    - name: Guardar lista de changes e sys_ids
       set_fact:
-        change_numbers: "{{ abertas.records | map(attribute='number') | list }}"
+        chg_all: "{{ abertas.records | default([]) }}"
+        chg_sys_ids: "{{ (abertas.records | map(attribute='sys_id') | list) | default([]) }}"
 
-    - name: Loop de detalhes por change
+    - name: Contagem total
       debug:
-        msg: |
-          Change: {{ item.number }}
-          Short Description: {{ item.short_description }}
-          Description: {{ item.description }}
-          Opened At: {{ item.opened_at }}
-          Última Atualização: {{ item.sys_updated_on }}
-      loop: "{{ abertas.records }}"
-      loop_control:
-        label: "{{ item.number }}"
+        msg: "Abertas: {{ chg_all | length }}"
+
+
+    # 2) Buckets derivados dos PRÓPRIOS CAMPOS da change
+    - name: Filtrar NOVAS (opened_at nos últimos {{ window_minutes_new }} min)
+      set_fact:
+        chg_new: >-
+          {{ chg_all | selectattr('opened_at','defined')
+                     | selectattr('opened_at','match','.+')    # evita vazios
+                     | selectattr('opened_at','search', '')    # no-op, só garante string
+                     | list }}
+    - set_fact:
+        chg_new: >-
+          {{ chg_all | selectattr('opened_at','defined')
+                     | selectattr('opened_at','match','.+')
+                     | selectattr('opened_at','regex_search',
+                                   '.*') | list }}
+      when: false
+
+    # Em vez de filtrar no Jinja (timezone etc.), melhor refazer a query “novas” por tempo:
+    - name: Recalcular NOVAS por janela (query por tempo)
+      servicenow.itsm.change_request_info:
+        instance: "{{ snow_instance }}"
+        sysparm_query: "active=true^opened_atONToday@javascript:gs.minutesAgoStart({{ window_minutes_new }})"
+        sysparm_display_value: "true"
+      register: chg_new_q
+
+    - name: Filtrar STALE (>= {{ stale_hours }}h sem atualização)
+      servicenow.itsm.change_request_info:
+        instance: "{{ snow_instance }}"
+        sysparm_query: "active=true^sys_updated_onRELATIVELE@hour@ago@{{ stale_hours }}"
+        sysparm_display_value: "true"
+      register: chg_stale_q
+
+    - set_fact:
+        chg_new:   "{{ chg_new_q.records   | default([]) }}"
+        chg_stale: "{{ chg_stale_q.records | default([]) }}"
+
+    # 3) Buckets de SLA via UMA consulta em lote na tabela task_sla
+    - name: Montar lista IN de sys_ids (para task_sla)
+      set_fact:
+        sysid_in: "{{ chg_sys_ids | join(',') }}"
+
+    - name: Buscar SLAs PRÓXIMOS de violar (<= {{ near_breach_minutes }} min) para essas changes
+      uri:
+        url: "{{ snow_instance.host }}/api/now/table/task_sla"
+        method: GET
+        force_basic_auth: true
+        user: "{{ snow_instance.username }}"
+        password: "{{ snow_instance.password }}"
+        headers: { Content-Type: "application/json" }
+        return_content: true
+        status_code: 200
+        params:
+          sysparm_query: >-
+            has_breached=false^stage=in_progress^task.sys_class_name=change_request
+            ^taskIN{{ sysid_in }}
+            ^planned_end_timeRELATIVELE@minute@fromnow@{{ near_breach_minutes }}
+          sysparm_fields: task.number,task.short_description,planned_end_time,stage,has_breached
+          sysparm_display_value: true
+          sysparm_limit: 500
+      register: chg_near
+
+    - name: Buscar SLAs VIOLADOS para essas changes
+      uri:
+        url: "{{ snow_instance.host }}/api/now/table/task_sla"
+        method: GET
+        force_basic_auth: true
+        user: "{{ snow_instance.username }}"
+        password: "{{ snow_instance.password }}"
+        headers: { Content-Type: "application/json" }
+        return_content: true
+        status_code: 200
+        params:
+          sysparm_query: >-
+            has_breached=true^task.sys_class_name=change_request
+            ^taskIN{{ sysid_in }}
+            ^task.active=true
+          sysparm_fields: task.number,task.short_description,breach_time,stage,has_breached
+          sysparm_display_value: true
+          sysparm_limit: 500
+      register: chg_breached
+
+    # 4) Resumos
+    - name: Contagens por bucket
+      debug:
+        msg:
+          - "Novas ({{ window_minutes_new }} min): {{ chg_new | length }}"
+          - "Stale (>= {{ stale_hours }}h): {{ chg_stale | length }}"
+          - "Near-breach (<= {{ near_breach_minutes }} min): {{ (chg_near.json.result | default([])) | length }}"
+          - "Violadas: {{ (chg_breached.json.result | default([])) | length }}"
+
+    - name: Listas simples (números)
+      debug:
+        msg:
+          novas:       "{{ chg_new   | map(attribute='number') | list }}"
+          stale:       "{{ chg_stale | map(attribute='number') | list }}"
+          near_breach: "{{ (chg_near.json.result | default([])) | map(attribute='task.number') | list }}"
+          breached:    "{{ (chg_breached.json.result | default([])) | map(attribute='task.number') | list }}"
