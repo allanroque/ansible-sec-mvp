@@ -1,5 +1,5 @@
 ---
-- name: Changes abertas + resumo (número, estado, horas sem update)
+- name: Changes abertas + detalhes
   hosts: localhost
   connection: local
   gather_facts: false
@@ -20,46 +20,21 @@
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
         sysparm_query: "active=true^phase_state=open"
-        sysparm_display_value: "true"   # estado legível na saída
+        sysparm_display_value: "true"
       register: abertas
 
-    - name: Quantidade encontrada
-      debug:
-        msg: "Total de changes abertas encontradas: {{ abertas.records | length }}"
-
-    - name: Mostrar apenas a lista de números
-      debug:
-        msg: "{{ abertas.records | map(attribute='number') | list }}"
-
-    - name: Epoch atual (segundos)
+    - name: Guardar lista de números
       set_fact:
-        now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
+        change_numbers: "{{ abertas.records | map(attribute='number') | list }}"
 
-    - name: Construir lista-resumo (number, state, horas_sem_update)
-      set_fact:
-        resumo_changes: >-
-          {{ (resumo_changes | default([])) + [ {
-              'number': item.number,
-              'state': (item.state | string),
-              'horas_sem_update': (
-                (now_epoch -
-                 (lookup('pipe', 'date -u -d \"' ~ item.sys_updated_on ~ '\" +%s') | int)
-                ) // 3600
-              ) | int,
-              'last_update': item.sys_updated_on
-            } ] }}
-      loop: "{{ abertas.records | default([]) }}"
-      when: (abertas.records | length) > 0
+    - name: Loop de detalhes por change
+      debug:
+        msg: |
+          Change: {{ item.number }}
+          Short Description: {{ item.short_description }}
+          Description: {{ item.description }}
+          Opened At: {{ item.opened_at }}
+          Última Atualização: {{ item.sys_updated_on }}
+      loop: "{{ abertas.records }}"
       loop_control:
         label: "{{ item.number }}"
-
-    - name: Mensagem formatada (uma linha por change) - ou mensagem vazia
-      debug:
-        msg: >-
-          {% if (resumo_changes | default([])) | length == 0 -%}
-          Nenhuma change aberta encontrada com o filtro (active=true AND phase_state=open).
-          {%- else -%}
-          {% for r in resumo_changes %}
-          - {{ "%-10s"|format(r.number) }} | state={{ "%-10s"|format(r.state) }} | {{ "%4dh"%(r.horas_sem_update) }} sem atualização | last={{ r.last_update }}
-          {% endfor %}
-          {%- endif %}
