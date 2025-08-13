@@ -3,7 +3,9 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
+  collections:
+    - servicenow.itsm
+    - community.general
   vars:
     # Limiar para classificação
     window_minutes_new: 15     # "novas" = abertas nos últimos X minutos
