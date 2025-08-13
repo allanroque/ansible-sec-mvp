@@ -1,5 +1,5 @@
 ---
-- name: Trabalhar buckets a partir da variável 'abertas' (sem novas chamadas)
+- name: Trabalhar buckets a partir da variável 'records' (sem novas chamadas)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -35,7 +35,7 @@
   tasks:
     - name: Normalizar lista completa de changes
       set_fact:
-        chg_all: "{{ abertas.records | default([]) }}"
+        chg_all: "{{ records | default([]) }}"
 
     - name: Contagem total (apenas para visibilidade)
       debug:
