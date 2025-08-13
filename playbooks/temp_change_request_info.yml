@@ -15,10 +15,9 @@
     - name: Validar estrutura de entrada
       assert:
         that:
-          - abertas is defined
-          - abertas.records is defined
-          - abertas.records | type_debug == 'list'
-        fail_msg: "A variável 'abertas.records' precisa estar definida como lista."
+          - records is defined
+          - records | type_debug == 'list'
+        fail_msg: "A variável 'records' precisa estar definida como lista."
 
   tasks:
     - name: Normalizar lista completa de changes
