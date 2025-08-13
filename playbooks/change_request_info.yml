@@ -13,7 +13,7 @@
           host: "{{ snow_instance }}"
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
-        sysparm_query: "active=true^state!=closed"
+        sysparm_query: "active=true^stateINnew,assess,authorize,scheduled,implement,review,pending"
         sysparm_display_value: "true"
       register: result
 
