@@ -10,7 +10,7 @@
     ownerless_hours: 24       # "velhos sem owner" = abertos há >= X horas sem owner
     stale_hours: 24           # "sem atualização" = sem update há >= X horas
     near_breach_minutes: 60   # "SLA próximo" = prazo em <= X minutos
-
+    target_ticket_number: "CHG0032689"
   # Entrada offline (sem chamadas ao ServiceNow aqui)
   vars_files:
     - "vars.yml"    # deve conter: records: [...]
@@ -320,3 +320,104 @@
         msg:
           - "HTTP status: {{ chat_resp.status }}"
           - "Resposta (pode vir vazia): {{ chat_resp.content | default('') }}"
+
+
+    - name: Localizar ticket alvo pelo number
+      set_fact:
+        ticket_obj: "{{ (chg_all | selectattr('number','equalto', target_ticket_number) | list | first) | default({}) }}"
+
+    - name: Falhar se não encontrou o ticket
+      assert:
+        that:
+          - ticket_obj | length > 0
+        fail_msg: "Ticket {{ target_ticket_number }} não encontrado em records."
+
+    # Epochs para cálculos de tempo
+    - name: Agora (UTC epoch)
+      set_fact:
+        now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
+
+    - name: Calcular horas aberto e horas desde o último update
+      set_fact:
+        opened_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d ' ~ ( (ticket_obj.opened_at | default('') ) | quote ) ~ ' +%s') | int)
+              if (ticket_obj.opened_at is defined and (ticket_obj.opened_at | string | length) > 0) else 0
+          }}
+        updated_epoch: >-
+          {{
+            (lookup('pipe','date -u -d ' ~ ( (ticket_obj.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
+              if (ticket_obj.sys_updated_on is defined and (ticket_obj.sys_updated_on | string | length) > 0) else 0
+          }}
+    - set_fact:
+        hours_open: "{{ ((now_epoch | int) - (opened_epoch | int)) // 3600 if opened_epoch|int>0 else 0 }}"
+        hours_since_update: "{{ ((now_epoch | int) - (updated_epoch | int)) // 3600 if updated_epoch|int>0 else 0 }}"
+
+    # Normalização de campos úteis
+    - name: Montar dicionário final de detalhes do ticket
+      set_fact:
+        ticket_details:
+          number: "{{ ticket_obj.number }}"
+          sys_id: "{{ ticket_obj.sys_id | default('') }}"
+          short_description: "{{ ticket_obj.short_description | default('') }}"
+          description: "{{ ticket_obj.description | default('') }}"
+          assigned_to: >-
+            {{
+              (ticket_obj.assigned_to | default('') | string | trim)
+              if (ticket_obj.assigned_to is defined and (ticket_obj.assigned_to | string | trim) != '')
+              else 'None'
+            }}
+          priority: "{{ ticket_obj.priority | default('') }}"
+          state: "{{ ticket_obj.state | default('') }}"
+          category: "{{ ticket_obj.category | default('') }}"
+          opened_at: "{{ ticket_obj.opened_at | default('') }}"
+          sys_updated_on: "{{ ticket_obj.sys_updated_on | default('') }}"
+          hours_open: "{{ hours_open | int }}"
+          hours_since_update: "{{ hours_since_update | int }}"
+          on_hold: "{{ ticket_obj.on_hold | default('') }}"
+          approval: "{{ ticket_obj.approval | default('') }}"
+          assignment_group: "{{ ticket_obj.assignment_group | default('') }}"
+          made_sla: "{{ ticket_obj.made_sla | default('') }}"
+          sla_due: "{{ ticket_obj.sla_due | default('') }}"
+
+    - name: Exibir detalhes completos no console
+      debug:
+        var: ticket_details
+
+    # Mensagem formatada (texto simples) – opcional Google Chat
+    - name: Construir mensagem formatada
+      set_fact:
+        mensagem_ticket: |-
+          *Ticket:* {{ ticket_details.number }}
+          *Título:* {{ ticket_details.short_description }}
+          *Descrição:* {{ ticket_details.description }}
+          *Responsável:* {{ ticket_details.assigned_to }}
+          *Prioridade:* {{ ticket_details.priority }}
+          *Estado:* {{ ticket_details.state }}
+          *Categoria:* {{ ticket_details.category }}
+          *Aberto em:* {{ ticket_details.opened_at }} ({{ ticket_details.hours_open }}h)
+          *Última atualização:* {{ ticket_details.sys_updated_on }} ({{ ticket_details.hours_since_update }}h)
+          *Assignment group:* {{ ticket_details.assignment_group }}
+          *On hold:* {{ ticket_details.on_hold }}
+          *Aprovação:* {{ ticket_details.approval }}
+          *Made SLA:* {{ ticket_details.made_sla }}
+          *SLA due:* {{ ticket_details.sla_due }}
+          *Sys ID:* {{ ticket_details.sys_id }}
+
+    - name: Pré-visualizar mensagem formatada
+      debug:
+        var: mensagem_ticket
+
+    # Enviar para Google Chat se webhook estiver definido
+    - name: Enviar para Google Chat (opcional)
+      uri:
+        url: "{{ google_chat_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json; charset=UTF-8"
+        body_format: json
+        body:
+          text: "{{ mensagem_ticket }}"
+        status_code: 200
+      when:
+        - google_chat_webhook_url is defined
