@@ -5,14 +5,13 @@
   gather_facts: false
 
   vars:
-    # Ajuste seus limiares aqui
+    # Limiar para classificação
     window_minutes_new: 15     # "novas" = abertas nos últimos X min
-    stale_hours: 24            # "stale" = sem atualização há >= X horas
+    stale_hours: 24            # "stale" = sem update há >= X horas
 
   vars_files: "vars.yml"
 
   pre_tasks:
-
     - name: Conferir chaves de topo do vars.yml
       debug:
         msg: "{{ vars | dict2items | map(attribute='key') | list | difference(['groups','hostvars']) | sort }}"
@@ -50,39 +49,41 @@
         chg_new: []
         chg_stale: []
 
-    # ---- NOVAS: opened_at dentro da janela (comparando epochs) ----
+    # ---------- NOVAS ----------
     - name: Classificar como NOVA (opened_at <= {{ window_minutes_new }} min atrás)
       set_fact:
         chg_new: "{{ chg_new + [ item ] }}"
+      vars:
+        opened_epoch: >-
+          {{ (lookup('pipe', 'date -u -d ' ~ (item.opened_at | quote) ~ ' +%s') | int)
+              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0 }}
+        delta_opened: "{{ (now_epoch | int) - (opened_epoch | int) }}"
       loop: "{{ chg_all }}"
       loop_control:
         label: "{{ item.number | default('sem-number') }}"
       when:
         - item.opened_at is defined
         - (item.opened_at | string | length) > 0
-        - >
-          (
-            now_epoch -
-            (lookup('pipe', 'date -u -d \"' ~ item.opened_at ~ '\" +%s') | int)
-          ) <= (window_minutes_new * 60)
+        - delta_opened | int <= (window_minutes_new | int) * 60
 
-    # ---- STALE: sem atualização há >= X horas (sys_updated_on) ----
+    # ---------- STALE ----------
     - name: Classificar como STALE (>= {{ stale_hours }}h sem atualização)
       set_fact:
         chg_stale: "{{ chg_stale + [ item ] }}"
+      vars:
+        updated_epoch: >-
+          {{ (lookup('pipe', 'date -u -d ' ~ (item.sys_updated_on | quote) ~ ' +%s') | int)
+              if (item.sys_updated_on is defined and (item.sys_updated_on | string | length) > 0) else 0 }}
+        delta_updated: "{{ (now_epoch | int) - (updated_epoch | int) }}"
       loop: "{{ chg_all }}"
       loop_control:
         label: "{{ item.number | default('sem-number') }}"
       when:
         - item.sys_updated_on is defined
         - (item.sys_updated_on | string | length) > 0
-        - >
-          (
-            now_epoch -
-            (lookup('pipe', 'date -u -d \"' ~ item.sys_updated_on ~ '\" +%s') | int)
-          ) >= (stale_hours * 3600)
+        - delta_updated | int >= (stale_hours | int) * 3600
 
-    # ---- Resumos e saídas úteis ----
+    # ---------- Resumos ----------
     - name: Contagens por bucket
       debug:
         msg:
@@ -108,7 +109,6 @@
       debug:
         var: chat_text
 
-    # Exemplo de bloco formatado por linha (se quiser ver detalhes)
     - name: Imprimir detalhes por linha (number | opened_at | sys_updated_on)
       debug:
         msg: >-
