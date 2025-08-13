@@ -40,44 +40,86 @@
         chg_all: "{{ abertas.records | default([]) }}"
         chg_sys_ids: "{{ (abertas.records | map(attribute='sys_id') | list) | default([]) }}"
 
-    # 3) Quantidade total de changes abertas
+    # 3.1) Quantidade total de changes abertas
     - name: Contagem total
       debug:
         msg: "Total de changes abertas encontradas: {{ chg_all | length }}"
 
-    # 4) Filtrar NOVAS — opened_at nos últimos X minutos
-    - name: Filtrar changes NOVAS
+    # 3.2) Epoch atual (em segundos) — portátil e rápido
+    - name: Epoch atual (UTC)
       set_fact:
-        chg_new: >-
-          {{ chg_all
-             | selectattr('opened_at','defined')
-             | selectattr('opened_at','match','.+')    # garante que não é vazio
-             | selectattr('opened_at','regex_search',
-               (ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ')
-                 - window_minutes_new * 60) | to_datetime | string ) 
-             | list }}
+        now_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
 
-    # 5) Filtrar VIOLADAS — última atualização há mais de X horas
-    - name: Filtrar changes STALE (sem update >= {{ stale_hours }} horas)
+    # 4) Inicializa buckets vazios
+    - name: Inicializar buckets locais
       set_fact:
-        chg_stale: >-
-          {{ chg_all
-             | selectattr('sys_updated_on','defined')
-             | selectattr('sys_updated_on','match','.+')
-             | selectattr('sys_updated_on','regex_search',
-               (ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ')
-                 - stale_hours * 3600) | to_datetime | string )
-             | list }}
+        chg_new: []
+        chg_stale: []
 
-    # 6) Filtrar PERTO DO VENCIMENTO — SLA <= X minutos
-    #    (depende de já ter um campo com SLA no retorno da primeira consulta)
-    - name: Filtrar changes NEAR BREACH
+    # 5) Classificar NOVAS: opened_at dentro da janela (comparando epochs)
+    #    Dica: se opened_at estiver vazio, ignora.
+    - name: Adicionar em NOVAS quando opened_at <= {{ window_minutes_new }} min atrás
       set_fact:
-        chg_near_breach: >-
-          {{ chg_all
-             | selectattr('sla_due','defined')
-             | selectattr('sla_due','match','.+')
-             | selectattr('sla_due','regex_search',
-               (ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ')
-                 + near_breach_minutes * 60) | to_datetime | string )
-             | list }}
+        chg_new: "{{ chg_new + [ item ] }}"
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number }}"
+      when:
+        - item.opened_at is defined
+        - item.opened_at | string | length > 0
+        - >
+          (
+            now_epoch
+            -
+            (lookup('pipe', 'date -u -d \"' ~ item.opened_at ~ '\" +%s') | int)
+          ) <= (window_minutes_new * 60)
+
+    # 6) Classificar STALE: sys_updated_on >= {{ stale_hours }} horas atrás
+    - name: Adicionar em STALE quando sem atualização há >= {{ stale_hours }}h
+      set_fact:
+        chg_stale: "{{ chg_stale + [ item ] }}"
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number }}"
+      when:
+        - item.sys_updated_on is defined
+        - item.sys_updated_on | string | length > 0
+        - >
+          (
+            now_epoch
+            -
+            (lookup('pipe', 'date -u -d \"' ~ item.sys_updated_on ~ '\" +%s') | int)
+          ) >= (stale_hours * 3600)
+
+    # 7) Resumo dos buckets (sem novas chamadas)
+    - name: Contagens por bucket (local)
+      debug:
+        msg:
+          - "Novas ({{ window_minutes_new }} min): {{ chg_new | length }}"
+          - "Stale (>= {{ stale_hours }}h): {{ chg_stale | length }}"
+
+    - name: Listas simples (números)
+      debug:
+        msg:
+          novas:  "{{ chg_new   | map(attribute='number') | list }}"
+          stale:  "{{ chg_stale | map(attribute='number') | list }}"
+
+    # 8) (Opcional) Montar mensagem de texto pronta para o Google Chat
+    - name: Montar mensagem (texto)
+      set_fact:
+        chat_text: |-
+          *Changes novas ({{ chg_new | length }})*
+          {{ (chg_new | map(attribute='number') | list) | default([]) }}
+
+          *>= {{ stale_hours }}h sem atualização ({{ chg_stale | length }})*
+          {{ (chg_stale | map(attribute='number') | list) | default([]) }}
+
+    - name: Pré-visualizar mensagem
+      debug:
+        var: chat_text
+
+    # 9) Observação sobre SLA:
+    #    "Near-breach" e "Violadas" vêm da TABELA task_sla (relacionada à change por task=sys_id).
+    #    Isso não está dentro de change_request. Para esses dois buckets,
+    #    a forma mais eficiente é UMA consulta em lote na task_sla com taskIN<sys_ids> (apenas 1 chamada),
+    #    evitando N chamadas por registro.
