@@ -19,9 +19,8 @@
           host: "{{ snow_instance }}"
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
-        # usamos o valor "interno" (cru) que você mostrou: phase_state: open (minúsculo)
         sysparm_query: "active=true^phase_state=open"
-        sysparm_display_value: "true"     # estado legível na saída
+        sysparm_display_value: "true"   # estado legível na saída
       register: abertas
 
     - name: Quantidade encontrada
@@ -40,12 +39,10 @@
               'state': (item.state | string),
               'horas_sem_update': (
                 (now_epoch -
-                 (item.sys_updated_on
-                   | to_datetime('%Y-%m-%d %H:%M:%S')
-                   | to_timestamp)
+                 (lookup('pipe', 'date -u -d \"' ~ item.sys_updated_on ~ '\" +%s') | int)
                 ) // 3600
               ) | int,
-              'is_new': ((item.state | string) | lower == 'new')
+              'last_update': item.sys_updated_on
             } ] }}
       loop: "{{ abertas.records | default([]) }}"
       when: (abertas.records | length) > 0
@@ -59,6 +56,6 @@
           Nenhuma change aberta encontrada com o filtro (active=true AND phase_state=open).
           {%- else -%}
           {% for r in resumo_changes %}
-          - {{ "%-10s"|format(r.number) }} | state={{ "%-8s"|format(r.state) }} | {{ "%4dh"%(r.horas_sem_update) }} sem atualização{% if r.is_new %} | NEW{% endif %}
+          - {{ "%-10s"|format(r.number) }} | state={{ "%-10s"|format(r.state) }} | {{ "%4dh"%(r.horas_sem_update) }} sem atualização | last={{ r.last_update }}
           {% endfor %}
           {%- endif %}
