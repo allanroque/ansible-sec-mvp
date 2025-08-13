@@ -293,8 +293,6 @@
           *SLA próximo (≤ {{ near_breach_minutes }} min):* {{ near_breach | map(attribute='number') | list }}
           *Violadas + sem update ≥ {{ stale_hours }} h:* {{ violadas_stale | map(attribute='number') | list }}
 
-
-
     - name: Pré-visualizar mensagem
       debug:
         var: chat_text
