@@ -22,10 +22,17 @@
     # 1) Coleta única: todas as changes abertas
     - name: Buscar changes abertas (phase_state=open)
       servicenow.itsm.change_request_info:
-        instance: "{{ snow_instance }}"
+        instance:
+          host: "{{ snow_instance }}"
+          username: "{{ snow_username }}"
+          password: "{{ snow_password }}"
         sysparm_query: "active=true^phase_state=open"
         sysparm_display_value: "true"
       register: abertas
+
+    - name: debug da variavel abertas
+      debug:
+        msg: "{{ abertas.records | map(attribute='number') | list }}"
 
     # 2) Guardar dados crus e sys_ids para referência futura
     - name: Guardar lista de changes e sys_ids
