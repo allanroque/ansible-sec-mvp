@@ -19,7 +19,7 @@
 
 
   tasks:
-    # 1) UMA consulta: changes abertas
+    # 1) Coleta única: todas as changes abertas
     - name: Buscar changes abertas (phase_state=open)
       servicenow.itsm.change_request_info:
         instance: "{{ snow_instance }}"
@@ -27,109 +27,50 @@
         sysparm_display_value: "true"
       register: abertas
 
+    # 2) Guardar dados crus e sys_ids para referência futura
     - name: Guardar lista de changes e sys_ids
       set_fact:
         chg_all: "{{ abertas.records | default([]) }}"
         chg_sys_ids: "{{ (abertas.records | map(attribute='sys_id') | list) | default([]) }}"
 
+    # 3) Quantidade total de changes abertas
     - name: Contagem total
       debug:
-        msg: "Abertas: {{ chg_all | length }}"
+        msg: "Total de changes abertas encontradas: {{ chg_all | length }}"
 
-
-    # 2) Buckets derivados dos PRÓPRIOS CAMPOS da change
-    - name: Filtrar NOVAS (opened_at nos últimos {{ window_minutes_new }} min)
+    # 4) Filtrar NOVAS — opened_at nos últimos X minutos
+    - name: Filtrar changes NOVAS
       set_fact:
         chg_new: >-
-          {{ chg_all | selectattr('opened_at','defined')
-                     | selectattr('opened_at','match','.+')    # evita vazios
-                     | selectattr('opened_at','search', '')    # no-op, só garante string
-                     | list }}
-    - set_fact:
-        chg_new: >-
-          {{ chg_all | selectattr('opened_at','defined')
-                     | selectattr('opened_at','match','.+')
-                     | selectattr('opened_at','regex_search',
-                                   '.*') | list }}
-      when: false
+          {{ chg_all
+             | selectattr('opened_at','defined')
+             | selectattr('opened_at','match','.+')    # garante que não é vazio
+             | selectattr('opened_at','regex_search',
+               (ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ')
+                 - window_minutes_new * 60) | to_datetime | string ) 
+             | list }}
 
-    # Em vez de filtrar no Jinja (timezone etc.), melhor refazer a query “novas” por tempo:
-    - name: Recalcular NOVAS por janela (query por tempo)
-      servicenow.itsm.change_request_info:
-        instance: "{{ snow_instance }}"
-        sysparm_query: "active=true^opened_atONToday@javascript:gs.minutesAgoStart({{ window_minutes_new }})"
-        sysparm_display_value: "true"
-      register: chg_new_q
-
-    - name: Filtrar STALE (>= {{ stale_hours }}h sem atualização)
-      servicenow.itsm.change_request_info:
-        instance: "{{ snow_instance }}"
-        sysparm_query: "active=true^sys_updated_onRELATIVELE@hour@ago@{{ stale_hours }}"
-        sysparm_display_value: "true"
-      register: chg_stale_q
-
-    - set_fact:
-        chg_new:   "{{ chg_new_q.records   | default([]) }}"
-        chg_stale: "{{ chg_stale_q.records | default([]) }}"
-
-    # 3) Buckets de SLA via UMA consulta em lote na tabela task_sla
-    - name: Montar lista IN de sys_ids (para task_sla)
+    # 5) Filtrar VIOLADAS — última atualização há mais de X horas
+    - name: Filtrar changes STALE (sem update >= {{ stale_hours }} horas)
       set_fact:
-        sysid_in: "{{ chg_sys_ids | join(',') }}"
+        chg_stale: >-
+          {{ chg_all
+             | selectattr('sys_updated_on','defined')
+             | selectattr('sys_updated_on','match','.+')
+             | selectattr('sys_updated_on','regex_search',
+               (ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ')
+                 - stale_hours * 3600) | to_datetime | string )
+             | list }}
 
-    - name: Buscar SLAs PRÓXIMOS de violar (<= {{ near_breach_minutes }} min) para essas changes
-      uri:
-        url: "{{ snow_instance.host }}/api/now/table/task_sla"
-        method: GET
-        force_basic_auth: true
-        user: "{{ snow_instance.username }}"
-        password: "{{ snow_instance.password }}"
-        headers: { Content-Type: "application/json" }
-        return_content: true
-        status_code: 200
-        params:
-          sysparm_query: >-
-            has_breached=false^stage=in_progress^task.sys_class_name=change_request
-            ^taskIN{{ sysid_in }}
-            ^planned_end_timeRELATIVELE@minute@fromnow@{{ near_breach_minutes }}
-          sysparm_fields: task.number,task.short_description,planned_end_time,stage,has_breached
-          sysparm_display_value: true
-          sysparm_limit: 500
-      register: chg_near
-
-    - name: Buscar SLAs VIOLADOS para essas changes
-      uri:
-        url: "{{ snow_instance.host }}/api/now/table/task_sla"
-        method: GET
-        force_basic_auth: true
-        user: "{{ snow_instance.username }}"
-        password: "{{ snow_instance.password }}"
-        headers: { Content-Type: "application/json" }
-        return_content: true
-        status_code: 200
-        params:
-          sysparm_query: >-
-            has_breached=true^task.sys_class_name=change_request
-            ^taskIN{{ sysid_in }}
-            ^task.active=true
-          sysparm_fields: task.number,task.short_description,breach_time,stage,has_breached
-          sysparm_display_value: true
-          sysparm_limit: 500
-      register: chg_breached
-
-    # 4) Resumos
-    - name: Contagens por bucket
-      debug:
-        msg:
-          - "Novas ({{ window_minutes_new }} min): {{ chg_new | length }}"
-          - "Stale (>= {{ stale_hours }}h): {{ chg_stale | length }}"
-          - "Near-breach (<= {{ near_breach_minutes }} min): {{ (chg_near.json.result | default([])) | length }}"
-          - "Violadas: {{ (chg_breached.json.result | default([])) | length }}"
-
-    - name: Listas simples (números)
-      debug:
-        msg:
-          novas:       "{{ chg_new   | map(attribute='number') | list }}"
-          stale:       "{{ chg_stale | map(attribute='number') | list }}"
-          near_breach: "{{ (chg_near.json.result | default([])) | map(attribute='task.number') | list }}"
-          breached:    "{{ (chg_breached.json.result | default([])) | map(attribute='task.number') | list }}"
+    # 6) Filtrar PERTO DO VENCIMENTO — SLA <= X minutos
+    #    (depende de já ter um campo com SLA no retorno da primeira consulta)
+    - name: Filtrar changes NEAR BREACH
+      set_fact:
+        chg_near_breach: >-
+          {{ chg_all
+             | selectattr('sla_due','defined')
+             | selectattr('sla_due','match','.+')
+             | selectattr('sla_due','regex_search',
+               (ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ')
+                 + near_breach_minutes * 60) | to_datetime | string )
+             | list }}
