@@ -277,3 +277,27 @@
     - name: Pré-visualizar mensagem
       debug:
         var: chat_text
+
+    - name: Enviar mensagem de texto para o Google Chat
+      uri:
+        url: "{{ google_chat_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json; charset=UTF-8"
+        body_format: json
+        body:
+          text: "{{ chat_text }}"
+        status_code: 200
+        return_content: true
+      register: chat_resp
+      when: chat_text is defined
+
+    - name: Exibir resposta do Google Chat
+      debug:
+        var: chat_resp.json
+
+    - name: Exibir resposta do Google Chat
+      debug:
+        msg:
+          - "HTTP status: {{ chat_resp.status }}"
+          - "Resposta (pode vir vazia): {{ chat_resp.content | default('') }}"
