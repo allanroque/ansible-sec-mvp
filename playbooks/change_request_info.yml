@@ -13,7 +13,7 @@
           host: "{{ snow_instance }}"
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
-        number: "CHG0032507"
+        sysparm_query: "active=true^phase_state=Open"
         sysparm_display_value: "true"
       register: result
 
