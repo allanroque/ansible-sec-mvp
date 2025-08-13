@@ -27,6 +27,10 @@
       debug:
         msg: "Total de changes abertas encontradas: {{ abertas.records | length }}"
 
+    - name: Mostrar apenas a lista de números
+      debug:
+        msg: "{{ abertas.records | map(attribute='number') | list }}"
+
     - name: Epoch atual (segundos)
       set_fact:
         now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
