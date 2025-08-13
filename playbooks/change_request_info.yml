@@ -23,6 +23,14 @@
         sysparm_display_value: "true"
       register: abertas
 
+    - name: Quantidade encontrada
+      debug:
+        msg: "Total de changes abertas encontradas: {{ abertas.records | length }}"
+
+    - name: Mostrar apenas a lista de números
+      debug:
+        msg: "{{ abertas.records | map(attribute='number') | list }}"
+
     - name: Guardar lista de números
       set_fact:
         change_numbers: "{{ abertas.records | map(attribute='number') | list }}"
