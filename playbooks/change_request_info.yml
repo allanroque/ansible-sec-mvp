@@ -14,8 +14,48 @@
           username: "{{ snow_username }}"
           password: "{{ snow_password }}"
         sysparm_query: "active=true^phase_state=Open"
+#        sysparm_query: "active=true^stateINNew,Assess,Authorize,Scheduled,Implement,Review,Pending"
         sysparm_display_value: "true"
       register: result
 
-    - debug:
-        var: result.records
+#    - debug:
+#        var: result.records
+
+    - name: Epoch atual (segundos)
+      set_fact:
+        now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
+
+    - name: Construir lista-resumo (number, state, horas_sem_update)
+      set_fact:
+        resumo_changes: >-
+          {{ (resumo_changes | default([])) + [ {
+              'number': item.number,
+              'state': (item.state | string),
+              'horas_sem_update': (
+                (now_epoch -
+                 (item.sys_updated_on
+                   | to_datetime('%Y-%m-%d %H:%M:%S')
+                   | to_timestamp)
+                ) // 3600
+              ) | int,
+              'is_new': ((item.state | string) | lower == 'new')
+            } ] }}
+      loop: "{{ abertas.records | default([]) }}"
+
+      # Fallback (se sua versão não tiver to_datetime/to_timestamp):
+      # vars:
+      #   upd_epoch_cmd: "{{ 'date -u -d \"%s\" +%s' | format(item.sys_updated_on) }}"
+      # set_fact:
+      #   resumo_changes: "{{ (resumo_changes | default([])) + [ {
+      #     'number': item.number,
+      #     'state': (item.state | string),
+      #     'horas_sem_update': ((now_epoch - (lookup('pipe', upd_epoch_cmd) | int)) // 3600) | int,
+      #     'is_new': ((item.state | string) | lower == 'new')
+      #   } ] }}"
+
+    - name: Mensagem formatada (uma linha por change)
+      debug:
+        msg: |-
+          {% for r in resumo_changes | default([]) %}
+          - {{ "%-10s"|format(r.number) }} | state={{ "%-8s"|format(r.state) }} | {{ "%4dh"%(r.horas_sem_update) }} sem atualização{% if r.is_new %} | NEW{% endif %}
+          {% endfor %}
