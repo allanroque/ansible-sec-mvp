@@ -1,0 +1,107 @@
+---
+- name: Trabalhar buckets a partir da variável 'abertas' (sem novas chamadas)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Ajuste seus limiares aqui
+    window_minutes_new: 15     # "novas" = abertas nos últimos X min
+    stale_hours: 24            # "stale" = sem atualização há >= X horas
+
+  vars_files: "vars.yml"
+
+  pre_tasks:
+    - name: Validar estrutura de entrada
+      assert:
+        that:
+          - abertas is defined
+          - abertas.records is defined
+          - abertas.records | type_debug == 'list'
+        fail_msg: "A variável 'abertas.records' precisa estar definida como lista."
+
+  tasks:
+    - name: Normalizar lista completa de changes
+      set_fact:
+        chg_all: "{{ abertas.records | default([]) }}"
+
+    - name: Contagem total (apenas para visibilidade)
+      debug:
+        msg: "Total de changes na entrada: {{ chg_all | length }}"
+
+    - name: Timestamp atual (UTC, epoch)
+      set_fact:
+        now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
+
+    - name: Inicializar buckets
+      set_fact:
+        chg_new: []
+        chg_stale: []
+
+    # ---- NOVAS: opened_at dentro da janela (comparando epochs) ----
+    - name: Classificar como NOVA (opened_at <= {{ window_minutes_new }} min atrás)
+      set_fact:
+        chg_new: "{{ chg_new + [ item ] }}"
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - item.opened_at is defined
+        - (item.opened_at | string | length) > 0
+        - >
+          (
+            now_epoch -
+            (lookup('pipe', 'date -u -d \"' ~ item.opened_at ~ '\" +%s') | int)
+          ) <= (window_minutes_new * 60)
+
+    # ---- STALE: sem atualização há >= X horas (sys_updated_on) ----
+    - name: Classificar como STALE (>= {{ stale_hours }}h sem atualização)
+      set_fact:
+        chg_stale: "{{ chg_stale + [ item ] }}"
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - item.sys_updated_on is defined
+        - (item.sys_updated_on | string | length) > 0
+        - >
+          (
+            now_epoch -
+            (lookup('pipe', 'date -u -d \"' ~ item.sys_updated_on ~ '\" +%s') | int)
+          ) >= (stale_hours * 3600)
+
+    # ---- Resumos e saídas úteis ----
+    - name: Contagens por bucket
+      debug:
+        msg:
+          - "Novas ({{ window_minutes_new }} min): {{ chg_new | length }}"
+          - ">= {{ stale_hours }}h sem atualização: {{ chg_stale | length }}"
+
+    - name: Listas simples (números)
+      debug:
+        msg:
+          novas: "{{ chg_new   | map(attribute='number') | list }}"
+          stale: "{{ chg_stale | map(attribute='number') | list }}"
+
+    - name: Mensagem pronta (texto simples)
+      set_fact:
+        chat_text: |-
+          *Changes novas ({{ chg_new | length }})*
+          {{ (chg_new | map(attribute='number') | list) | default([]) }}
+
+          *>= {{ stale_hours }}h sem atualização ({{ chg_stale | length }})*
+          {{ (chg_stale | map(attribute='number') | list) | default([]) }}
+
+    - name: Pré-visualizar mensagem
+      debug:
+        var: chat_text
+
+    # Exemplo de bloco formatado por linha (se quiser ver detalhes)
+    - name: Imprimir detalhes por linha (number | opened_at | sys_updated_on)
+      debug:
+        msg: >-
+          {{ item.number }} | opened_at={{ item.opened_at | default('') }}
+          | last_update={{ item.sys_updated_on | default('') }}
+      loop: "{{ chg_all }}"
+      loop_control:
+        label: "{{ item.number }}"
