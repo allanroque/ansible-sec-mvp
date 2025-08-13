@@ -1,19 +1,19 @@
 ---
-- name: Buckets (Novas sem owner, SLA perto, Violadas + 24h sem update) a partir de variáveis locais
+- name: Buckets (Novos sem owner, SLA perto, Violadas + 24h sem update) a partir de variáveis locais
   hosts: localhost
   connection: local
   gather_facts: false
-  collections:
-    - servicenow.itsm    # NÃO inclua community.general aqui
 
   vars:
-    window_minutes_new: 15     # "novas" = abertas nos últimos X minutos
+    # Limiares
+    window_minutes_new: 15     # "novas" = abertas nos últimos X minutos e sem owner
     near_breach_minutes: 60    # SLA expira em <= X minutos
     stale_hours: 24            # Sem atualização há >= X horas (para violadas)
 
+  # Apenas o vars.yml é obrigatório.
+  # Se quiser, adicione em vars.yml uma chave opcional "slas: [...]"
   vars_files:
-    - "vars.yml"   # contém: records: [...]
-    - "slas.yml"   # contém: slas: [...]
+    - "vars.yml"
 
   pre_tasks:
     - name: Validar 'records' (changes)
@@ -38,8 +38,7 @@
       set_fact:
         chg_all: "{{ records }}"
 
-    # >>>> Sem json_query: construir mapas com zip <<<<
-    - name: Mapa sys_id -> number
+    - name: Mapa sys_id -> number (sem json_query)
       set_fact:
         map_sysid_to_number: >-
           {{
@@ -49,7 +48,7 @@
             )
           }}
 
-    - name: Mapa number -> sys_id
+    - name: Mapa number -> sys_id (sem json_query)
       set_fact:
         map_number_to_sysid: >-
           {{
@@ -89,82 +88,112 @@
             }
           }}
       loop: "{{ chg_all }}"
-      loop_control: { label: "{{ item.number | default('sem-number') }}" }
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
       when:
         - item.opened_at is defined
         - (item.opened_at | string | length) > 0
         - sem_owner
         - delta_open_sec | int <= (window_minutes_new | int) * 60
 
-    # -------- Preparar SLAs normalizados --------
-    - name: Normalizar SLAs (planned_end_epoch, has_breached bool, chg_number)
-      set_fact:
-        slas_norm: >-
-          {%- set out = [] -%}
-          {%- for s in slas -%}
-          {%- set breached = ( s.has_breached if (s.has_breached is boolean)
-                               else ((s.has_breached | default('false') | string | lower) == 'true') ) -%}
-          {%- set pend = (lookup('pipe', 'date -u -d ' ~ ( (s.planned_end_time | default('') ) | quote ) ~ ' +%s') | int)
-                          if (s.planned_end_time is defined and (s.planned_end_time | string | length) > 0) else 0 -%}
-          {%- set num = ( s.task_number | default('') ) -%}
-          {%- if not num and (s.task is defined) and (s.task in map_sysid_to_number) -%}
-            {%- set num = map_sysid_to_number[s.task] -%}
-          {%- endif -%}
-          {%- set rec = {
-                'task_sys_id': (s.task | default('')),
-                'task_number': num,
-                'planned_end_epoch': pend,
-                'planned_end_time': (s.planned_end_time | default('')),
-                'has_breached': breached,
-                'stage': (s.stage | default(''))
-              } -%}
-          {%- do out.append(rec) -%}
-          {%- endfor -%}
-          {{ out }}
+    # -------- 2) SLA próximo de violar (opcional; só roda se houver 'slas') --------
+    - name: Aviso — Sem dados de SLA, pulando bucket "near_breach"
+      debug:
+        msg: "Não encontrei 'slas' (ou lista vazia). Pulei 'SLA próximo de violar'."
+      when: slas | length == 0
 
-    # -------- 2) SLA próximo de violar --------
     - name: Classificar "SLA próximo de violar"
       set_fact:
         near_breach: "{{ (near_breach + [ nb_reg ]) | unique }}"
       vars:
-        chg_num: "{{ item.task_number | default('') }}"
-        time_left_sec: "{{ (item.planned_end_epoch | int) - (now_epoch | int) }}"
+        # Resolve o número da CHG pelo sys_id se necessário
+        chg_num: >-
+          {{
+            ( item.task_number | default('') )
+              if (item.task_number | default('') | length > 0)
+              else (
+                map_sysid_to_number[item.task]
+                  if (item.task is defined and item.task in map_sysid_to_number)
+                  else ''
+              )
+          }}
+        planned_end_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d ' ~ ( (item.planned_end_time | default('') ) | quote ) ~ ' +%s') | int)
+              if (item.planned_end_time is defined and (item.planned_end_time | string | length) > 0)
+              else 0
+          }}
+        has_breached_bool: >-
+          {{
+            (item.has_breached)
+              if (item.has_breached is boolean)
+              else ((item.has_breached | default('false') | string | lower) == 'true')
+          }}
+        time_left_sec: "{{ (planned_end_epoch | int) - (now_epoch | int) }}"
         nb_reg: >-
           {{
             {
               'number': chg_num,
               'minutes_left': (time_left_sec // 60) | int,
-              'planned_end_time': item.planned_end_time
+              'planned_end_time': item.planned_end_time | default('')
             }
           }}
-      loop: "{{ slas_norm }}"
-      loop_control: { label: "{{ item.task_number | default(item.task_sys_id | default('sem-task')) }}" }
+      loop: "{{ slas }}"
+      loop_control:
+        label: "{{ item.task_number | default(item.task | default('sem-task')) }}"
       when:
-        - item.has_breached == false
-        - item.planned_end_epoch | int > 0
+        - slas | length > 0
+        - has_breached_bool == false
+        - planned_end_epoch | int > 0
         - time_left_sec | int >= 0
         - time_left_sec | int <= (near_breach_minutes | int) * 60
         - chg_num | length > 0
 
-    # -------- 3) Violadas e ≥24h sem atualização --------
+    # -------- 3) Violadas e ≥24h sem atualização (opcional; só roda se houver 'slas') --------
+    - name: Aviso — Sem dados de SLA, pulando bucket "violadas_stale"
+      debug:
+        msg: "Não encontrei 'slas' (ou lista vazia). Pulei 'Violadas + sem update >= {{ stale_hours }}h'."
+      when: slas | length == 0
+
     - name: Classificar "Violadas e sem atualização há >= {{ stale_hours }}h"
       set_fact:
         violadas_stale: "{{ (violadas_stale + [ vs_reg ]) | unique }}"
       vars:
-        chg_num: "{{ item.task_number | default('') }}"
+        has_breached_bool: >-
+          {{
+            (item.has_breached)
+              if (item.has_breached is boolean)
+              else ((item.has_breached | default('false') | string | lower) == 'true')
+          }}
+        chg_num: >-
+          {{
+            ( item.task_number | default('') )
+              if (item.task_number | default('') | length > 0)
+              else (
+                map_sysid_to_number[item.task]
+                  if (item.task is defined and item.task in map_sysid_to_number)
+                  else ''
+              )
+          }}
         chg_sysid: >-
           {{
-            (item.task_sys_id)
-              if (item.task_sys_id is defined and (item.task_sys_id | string | length) > 0)
+            (item.task)
+              if (item.task is defined and (item.task | string | length) > 0)
               else ( map_number_to_sysid[chg_num] if (chg_num in map_number_to_sysid) else '' )
           }}
         chg_obj: "{{ (chg_all | selectattr('sys_id','equalto', chg_sysid) | list | first) | default({}) }}"
         updated_epoch: >-
-          {{ (lookup('pipe','date -u -d ' ~ ( (chg_obj.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
-              if (chg_obj.sys_updated_on is defined and (chg_obj.sys_updated_on | string | length) > 0) else 0 }}
+          {{
+            (lookup('pipe','date -u -d ' ~ ( (chg_obj.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
+              if (chg_obj.sys_updated_on is defined and (chg_obj.sys_updated_on | string | length) > 0)
+              else 0
+          }}
         opened_epoch: >-
-          {{ (lookup('pipe','date -u -d ' ~ ( (chg_obj.opened_at | default('') ) | quote ) ~ ' +%s') | int)
-              if (chg_obj.opened_at is defined and (chg_obj.opened_at | string | length) > 0) else 0 }}
+          {{
+            (lookup('pipe','date -u -d ' ~ ( (chg_obj.opened_at | default('') ) | quote ) ~ ' +%s') | int)
+              if (chg_obj.opened_at is defined and (chg_obj.opened_at | string | length) > 0)
+              else 0
+          }}
         hours_since_update: "{{ ((now_epoch | int) - (updated_epoch | int)) // 3600 }}"
         hours_open: "{{ ((now_epoch | int) - (opened_epoch | int)) // 3600 }}"
         vs_reg: >-
@@ -177,10 +206,12 @@
               'hours_open': hours_open | int
             }
           }}
-      loop: "{{ slas_norm }}"
-      loop_control: { label: "{{ item.task_number | default(item.task_sys_id | default('sem-task')) }}" }
+      loop: "{{ slas }}"
+      loop_control:
+        label: "{{ item.task_number | default(item.task | default('sem-task')) }}"
       when:
-        - item.has_breached == true
+        - slas | length > 0
+        - has_breached_bool == true
         - chg_num | length > 0
         - updated_epoch | int > 0
         - ((now_epoch | int) - (updated_epoch | int)) >= (stale_hours | int) * 3600
@@ -207,10 +238,12 @@
     - name: Detalhes | SLA próximo de violar
       debug:
         var: near_breach
+      when: slas | length > 0
 
     - name: Detalhes | Violadas e >= {{ stale_hours }}h sem update
       debug:
         var: violadas_stale
+      when: slas | length > 0
 
     - name: Mensagem pronta (resumo texto p/ Google Chat)
       set_fact:
