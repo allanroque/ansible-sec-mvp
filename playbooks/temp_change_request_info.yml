@@ -4,10 +4,9 @@
   connection: local
   gather_facts: false
   collections:
-    - servicenow.itsm
-    - community.general
+    - servicenow.itsm    # NÃO inclua community.general aqui
+
   vars:
-    # Limiar para classificação
     window_minutes_new: 15     # "novas" = abertas nos últimos X minutos
     near_breach_minutes: 60    # SLA expira em <= X minutos
     stale_hours: 24            # Sem atualização há >= X horas (para violadas)
@@ -39,15 +38,25 @@
       set_fact:
         chg_all: "{{ records }}"
 
-    - name: Mapas para join CHG <-> SLA
+    # >>>> Sem json_query: construir mapas com zip <<<<
+    - name: Mapa sys_id -> number
       set_fact:
         map_sysid_to_number: >-
           {{
-            dict(chg_all | json_query('[].{k: sys_id, v: number}') | map('dict2items') | map('items2dict'))
+            dict(
+              (chg_all | map(attribute='sys_id')   | list)
+              | zip(chg_all | map(attribute='number') | list)
+            )
           }}
+
+    - name: Mapa number -> sys_id
+      set_fact:
         map_number_to_sysid: >-
           {{
-            dict(chg_all | json_query('[].{k: number, v: sys_id}') | map('dict2items') | map('items2dict'))
+            dict(
+              (chg_all | map(attribute='number') | list)
+              | zip(chg_all | map(attribute='sys_id')   | list)
+            )
           }}
 
     # ========= Buckets =========
