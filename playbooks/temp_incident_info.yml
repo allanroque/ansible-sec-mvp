@@ -1,19 +1,32 @@
 ---
-- name: Buckets de incidentes baseados em prioridade e SLAs customizados
+- name: Classificação de incidentes + SLA customizado
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
-    # Regras SLA por prioridade (minutos para nome, horas para resolver)
-    sla_rules:
-      1: { name_time_min: 15,   resolve_time_h: 4   }   # P1 CRITICAL
-      2: { name_time_min: 30,   resolve_time_h: 15  }   # P2 HIGH
-      3: { name_time_min: 90,   resolve_time_h: 60  }   # P3 MEDIUM (2,5 dias ≈ 60h)
-      4: { name_time_min: 180,  resolve_time_h: 120 }   # P4 LOW (5 dias ≈ 120h)
+    # Regras de nomeação e resolução (em minutos)
+    nomeacao_minutos:
+      1: 15      # P1 - CRITICAL
+      2: 30      # P2 - HIGH
+      3: 90      # P3 - MEDIUM
+      4: 180     # P4 - LOW
+    resolucao_minutos:
+      1: 240     # P1 - 4h
+      2: 900     # P2 - 15h
+      3: 3600    # P3 - 2,5 dias
+      4: 7200    # P4 - 5 dias
 
   vars_files:
     - "vars_incident.yml"   # deve conter: records: [...]
+
+  pre_tasks:
+    - name: Validar 'records' do vars_incident.yml
+      assert:
+        that:
+          - records is defined
+          - records | type_debug == 'list'
+        fail_msg: "Esperava 'records' como lista em vars_incident.yml."
 
   tasks:
     - name: Epoch atual (UTC)
@@ -26,61 +39,109 @@
 
     - name: Inicializar buckets
       set_fact:
-        fora_nomeacao: []      # passaram do prazo de nomeação (owner vazio)
-        fora_resolucao: []     # passaram do prazo de resolução (mesmo resolvidos não?)
-        dentro_sla: []         # ainda dentro do prazo
+        fora_nomeacao: []   # sem responsável dentro do prazo de nomeação
+        fora_resolucao: []  # ainda abertos mas já violaram prazo de resolução
+        near_breach: []     # próximos de violar prazo de resolução
 
-    - name: Classificar incidentes por prioridade e SLA
+    # --------- 1) Fora do prazo de nomeação ---------
+    - name: Classificar incidentes fora do prazo de nomeação
       set_fact:
-        fora_nomeacao: "{{ fora_nomeacao + ([ reg ] if sla_breach_nome else []) }}"
-        fora_resolucao: "{{ fora_resolucao + ([ reg ] if sla_breach_resolve else []) }}"
-        dentro_sla: "{{ dentro_sla + ([ reg ] if (not sla_breach_nome and not sla_breach_resolve) else []) }}"
+        fora_nomeacao: "{{ fora_nomeacao + [ item ] }}"
       vars:
-        # Epochs
         opened_epoch: >-
           {{
-            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('') ) | quote ) ~ ' +%s') | int)
-              if (item.opened_at | default('') | length > 0) else 0
+            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('')) | quote ) ~ ' +%s') | int)
+              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
           }}
-        delta_min: "{{ ((now_epoch - opened_epoch) // 60) | int }}"
-        delta_h:   "{{ ((now_epoch - opened_epoch) // 3600) | int }}"
-
-        # SLA thresholds pela prioridade
-        pri: "{{ (item.priority | default('4')) | int }}"
-        name_time_min: "{{ sla_rules[pri].name_time_min | int }}"
-        resolve_time_h: "{{ sla_rules[pri].resolve_time_h | int }}"
-
-        # Condições de breach
-        sem_owner: "{{ (item.assigned_to | default('') | trim) == '' }}"
-        sla_breach_nome: "{{ sem_owner and (delta_min > name_time_min) }}"
-        sla_breach_resolve: "{{ delta_h > resolve_time_h }}"
-
-        # Registro resumido
-        reg:
-          number: "{{ item.number }}"
-          sys_id: "{{ item.sys_id }}"
-          priority: "{{ item.priority }}"
-          short_description: "{{ item.short_description | default('') }}"
-          opened_at: "{{ item.opened_at }}"
-          minutes_open: "{{ delta_min }}"
-          hours_open: "{{ delta_h }}"
-          assigned_to: "{{ item.assigned_to | default('None') }}"
+        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
+        tem_owner: >-
+          {{ (item.assigned_to is defined) and ((item.assigned_to | string | trim) != '') }}
       loop: "{{ inc_all }}"
       loop_control:
         label: "{{ item.number | default('sem-number') }}"
-      when: opened_epoch > 0
+      when:
+        - (opened_epoch | int) > 0
+        - not tem_owner
+        - (delta_open_sec | int) >= (nomeacao_minutos[item.priority | int] * 60)
 
-    # ------------------ Saídas ------------------
+    # --------- 2) Fora do prazo de resolução ---------
+    - name: Classificar incidentes fora do prazo de resolução
+      set_fact:
+        fora_resolucao: "{{ fora_resolucao + [ item ] }}"
+      vars:
+        opened_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('')) | quote ) ~ ' +%s') | int)
+              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
+          }}
+        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
+      loop: "{{ inc_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - (opened_epoch | int) > 0
+        - (delta_open_sec | int) >= (resolucao_minutos[item.priority | int] * 60)
+
+    # --------- 3) Próximos de violar SLA (<= 60 min) ---------
+    - name: Classificar incidentes próximos de violar SLA
+      set_fact:
+        near_breach: "{{ near_breach + [ item ] }}"
+      vars:
+        opened_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('')) | quote ) ~ ' +%s') | int)
+              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
+          }}
+        deadline_epoch: "{{ (opened_epoch | int) + (resolucao_minutos[item.priority | int] * 60) }}"
+        time_left_sec: "{{ (deadline_epoch | int) - (now_epoch | int) }}"
+      loop: "{{ inc_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - (opened_epoch | int) > 0
+        - (time_left_sec | int) > 0
+        - (time_left_sec | int) <= (60 * 60)
+
+    # ------------------ Saídas / Resumo ------------------
     - name: Contagens por bucket
       debug:
         msg:
           - "Fora do prazo de nomeação: {{ fora_nomeacao | length }}"
           - "Fora do prazo de resolução: {{ fora_resolucao | length }}"
-          - "Dentro do SLA: {{ dentro_sla | length }}"
+          - "Próximos de violar SLA (≤60min): {{ near_breach | length }}"
 
-    - name: Listas simples (números)
+    - name: Listas simples por bucket
       debug:
         msg:
           fora_nomeacao: "{{ fora_nomeacao | map(attribute='number') | list }}"
           fora_resolucao: "{{ fora_resolucao | map(attribute='number') | list }}"
-          dentro_sla: "{{ dentro_sla | map(attribute='number') | list }}"
+          near_breach: "{{ near_breach | map(attribute='number') | list }}"
+
+    # --------- 4) Notificação Google Chat ---------
+    - name: Montar mensagem final
+      set_fact:
+        chat_text: |-
+          *Resumo SLA Incidentes*
+          - Fora do prazo de nomeação: {{ fora_nomeacao | length }}
+          - Fora do prazo de resolução: {{ fora_resolucao | length }}
+          - Próximos de violar SLA (≤60min): {{ near_breach | length }}
+
+          *Tickets fora nomeação:* {{ fora_nomeacao | map(attribute='number') | list }}
+          *Tickets fora resolução:* {{ fora_resolucao | map(attribute='number') | list }}
+          *Tickets próximos SLA:* {{ near_breach | map(attribute='number') | list }}
+
+    - name: Pré-visualizar mensagem
+      debug:
+        var: chat_text
+
+    - name: Enviar mensagem para Google Chat
+      uri:
+        url: "{{ google_chat_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json; charset=UTF-8"
+        body_format: json
+        body:
+          text: "{{ chat_text }}"
+        status_code: 200
+      when: google_chat_webhook_url is defined
