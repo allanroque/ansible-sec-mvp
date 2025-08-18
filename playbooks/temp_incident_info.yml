@@ -6,6 +6,7 @@
 
   vars:
     # Regras de nomeação e resolução (em minutos)
+    near_breach_minutes: 60
     nomeacao_minutos:
       1: 15      # P1 - CRITICAL
       2: 30      # P2 - HIGH
