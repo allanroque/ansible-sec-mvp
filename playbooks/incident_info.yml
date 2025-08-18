@@ -1,87 +1,117 @@
 ---
-- name: Get New Incidents from ServiceNow
+- name: Incidentes abertos + detalhes
   hosts: localhost
   connection: local
+  gather_facts: false
+  collections:
+    - servicenow.itsm
+
   vars:
-    # Configurações de filtro para tickets novos
-    new_ticket_threshold_hours: 24  # Buscar tickets das últimas 24h
-    max_results: 50  # Limitar número de resultados para performance
-  
+    # Credenciais/instância (ideal: usar credencial no AAP)
+    host: "{{ snow_instance }}"
+    username: "{{ snow_username }}"
+    password: "{{ snow_password }}"
+
+    # Limites e janelas
+    window_minutes_new: 15   # janela para "novos"
+    stale_hours: 24          # sem update >= Xh
+    near_breach_minutes: 60  # SLA vence em <= X min
+
   tasks:
-    - name: Calculate timestamp for new tickets
+    # 1) Coleta única: todos incidentes ativos
+    - name: Buscar incidentes abertos (active=true)
+      servicenow.itsm.incident_info:
+        instance:
+          host: "{{ snow_instance }}"
+          username: "{{ snow_username }}"
+          password: "{{ snow_password }}"
+        sysparm_query: "active=true"
+        sysparm_display_value: "true"
+      register: abertas
+
+    - name: Debug da variável abertas
+      debug:
+        msg: "{{ abertas.records | map(attribute='number') | list }}"
+
+    # 2) Guardar lista e sys_ids
+    - name: Guardar lista de incidentes e sys_ids
       set_fact:
-        new_ticket_timestamp: "{{ (ansible_date_time.epoch | int) - (new_ticket_threshold_hours * 3600) }}"
-    
-    - name: Convert timestamp to ServiceNow format
+        inc_all: "{{ abertas.records | default([]) }}"
+        inc_sys_ids: "{{ (abertas.records | map(attribute='sys_id') | list) | default([]) }}"
+
+    # 3.1) Quantidade total
+    - name: Contagem total
+      debug:
+        msg: "Total de incidentes abertos encontrados: {{ inc_all | length }}"
+
+    # 3.2) Epoch atual
+    - name: Epoch atual (UTC)
       set_fact:
-        snow_timestamp: "{{ new_ticket_timestamp | int | strftime('%Y-%m-%d %H:%M:%S') }}"
-    
-    - name: Get new incidents only via REST API
-      uri:
-        url: "https://{{ snow_instance }}/api/now/table/incident"
-        method: GET
-        user: "{{ snow_username }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: yes
-        headers:
-          Accept: "application/json"
-        url_username: "{{ snow_username }}"
-        url_password: "{{ snow_password }}"
-        validate_certs: yes
-        return_content: yes
-        # Query otimizada para buscar apenas incidentes novos
-        url_extra_params:
-          sysparm_query: "opened_at>={{ snow_timestamp }}^state=1^priorityIN1,2,3"
-          sysparm_limit: "{{ max_results }}"
-          sysparm_display_value: "true"
-          sysparm_exclude_reference_link: "true"
-          sysparm_fields: "number,short_description,priority,opened_at,caller_id,sys_id,state,category,impact,urgency"
-      register: new_incidents
-      retries: 3
-      delay: 5
-      until: new_incidents.status == 200
-    
-    - name: Filter only active new incidents
+        now_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
+
+    # 4) Inicializar buckets
+    - name: Inicializar buckets
       set_fact:
-        filtered_new_incidents: "{{ new_incidents.json.result | selectattr('state', 'equalto', '1') | list }}"
-    
-    - name: Display summary of new incidents
+        inc_new: []
+        inc_stale: []
+
+    # 5) Classificar NOVOS (opened_at <= janela)
+    - name: Adicionar em NOVOS quando opened_at <= {{ window_minutes_new }} min atrás
+      set_fact:
+        inc_new: "{{ inc_new + [ item ] }}"
+      loop: "{{ inc_all }}"
+      loop_control:
+        label: "{{ item.number }}"
+      when:
+        - item.opened_at is defined
+        - item.opened_at | string | length > 0
+        - >
+          (
+            now_epoch
+            -
+            (lookup('pipe', 'date -u -d \"' ~ item.opened_at ~ '\" +%s') | int)
+          ) <= (window_minutes_new * 60)
+
+    # 6) Classificar STALE (sem atualização há >= stale_hours)
+    - name: Adicionar em STALE quando sem atualização há >= {{ stale_hours }}h
+      set_fact:
+        inc_stale: "{{ inc_stale + [ item ] }}"
+      loop: "{{ inc_all }}"
+      loop_control:
+        label: "{{ item.number }}"
+      when:
+        - item.sys_updated_on is defined
+        - item.sys_updated_on | string | length > 0
+        - >
+          (
+            now_epoch
+            -
+            (lookup('pipe', 'date -u -d \"' ~ item.sys_updated_on ~ '\" +%s') | int)
+          ) >= (stale_hours * 3600)
+
+    # 7) Resumo dos buckets
+    - name: Contagens por bucket
       debug:
-        msg: |
-          📊 **Resumo de Incidentes Novos**
-          
-          • Total encontrados: {{ new_incidents.json.result | length }}
-          • Novos ativos: {{ filtered_new_incidents | length }}
-          • Período: últimas {{ new_ticket_threshold_hours }} horas
-          • Timestamp de busca: {{ snow_timestamp }}
-          • Tempo de resposta: {{ new_incidents.elapsed }}ms
-    
-    - name: Display new incidents details
+        msg:
+          - "Novos ({{ window_minutes_new }} min): {{ inc_new | length }}"
+          - "Stale (>= {{ stale_hours }}h): {{ inc_stale | length }}"
+
+    - name: Listas simples (números)
       debug:
-        msg: |
-          🚨 **Incidente**: {{ item.number }}
-          📝 **Descrição**: {{ item.short_description }}
-          🏷️ **Prioridade**: {{ item.priority }}
-          📅 **Aberto em**: {{ item.opened_at }}
-          👤 **Solicitante**: {{ item.caller_id }}
-          🏷️ **Categoria**: {{ item.category }}
-          ⚡ **Impacto**: {{ item.impact }}
-          🚨 **Urgência**: {{ item.urgency }}
-          🔗 **Link**: https://{{ snow_instance }}/nav_to.do?uri=incident.do?sys_id={{ item.sys_id }}
-      loop: "{{ filtered_new_incidents }}"
-      when: filtered_new_incidents | length > 0
-    
-    - name: No new incidents found
+        msg:
+          novos:  "{{ inc_new   | map(attribute='number') | list }}"
+          stale:  "{{ inc_stale | map(attribute='number') | list }}"
+
+    # 8) Montar mensagem para Chat (opcional)
+    - name: Montar mensagem (texto)
+      set_fact:
+        chat_text: |-
+          *Incidentes novos ({{ inc_new | length }})*
+          {{ (inc_new | map(attribute='number') | list) | default([]) }}
+
+          *>= {{ stale_hours }}h sem atualização ({{ inc_stale | length }})*
+          {{ (inc_stale | map(attribute='number') | list) | default([]) }}
+
+    - name: Pré-visualizar mensagem
       debug:
-        msg: "✅ Nenhum incidente novo encontrado nas últimas {{ new_ticket_threshold_hours }} horas"
-      when: filtered_new_incidents | length == 0
-    
-    - name: Performance metrics
-      debug:
-        msg: |
-          ⚡ **Métricas de Performance**
-          
-          • Tempo total de execução: {{ new_incidents.elapsed }}ms
-          • Registros retornados: {{ new_incidents.json.result | length }}
-          • Tamanho da resposta: {{ new_incidents.json | length }} bytes
-          • Status da requisição: {{ new_incidents.status }}
+        var: chat_text
