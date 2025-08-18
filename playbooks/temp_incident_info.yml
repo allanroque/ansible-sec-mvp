@@ -89,14 +89,18 @@
     # --------- 3) Próximos de violar SLA (<= 60 min) ---------
     - name: Classificar incidentes próximos de violar SLA
       set_fact:
-        near_breach: "{{ near_breach + [ item ] }}"
+        proximos_sla: "{{ proximos_sla + [ item ] }}"
       vars:
         opened_epoch: >-
           {{
             (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('')) | quote ) ~ ' +%s') | int)
               if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
           }}
-        deadline_epoch: "{{ (opened_epoch | int) + (resolucao_minutos[item.priority | int] * 60) }}"
+        deadline_epoch: >-
+          {{
+            (opened_epoch | int)
+            + (resolucao_minutos.get(item.priority | int, resolucao_minutos['default']) * 60)
+          }}
         time_left_sec: "{{ (deadline_epoch | int) - (now_epoch | int) }}"
       loop: "{{ inc_all }}"
       loop_control:
@@ -104,7 +108,7 @@
       when:
         - (opened_epoch | int) > 0
         - (time_left_sec | int) > 0
-        - (time_left_sec | int) <= (60 * 60)
+        - (time_left_sec | int) <= (near_breach_minutes | int) * 60
 
     # ------------------ Saídas / Resumo ------------------
     - name: Contagens por bucket
