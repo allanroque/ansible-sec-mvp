@@ -17,6 +17,7 @@
       2: 900     # P2 - 15h
       3: 3600    # P3 - 2,5 dias
       4: 7200    # P4 - 5 dias
+      default: 999999   # fallback
 
   vars_files:
     - "vars_incident.yml"   # deve conter: records: [...]
@@ -82,7 +83,8 @@
         label: "{{ item.number | default('sem-number') }}"
       when:
         - (opened_epoch | int) > 0
-        - (delta_open_sec | int) >= (resolucao_minutos[item.priority | int] * 60)
+        - (item.priority | int) in resolucao_minutos.keys()
+        - (delta_open_sec | int) >= (resolucao_minutos.get(item.priority | int, resolucao_minutos.default) * 60)
 
     # --------- 3) Próximos de violar SLA (<= 60 min) ---------
     - name: Classificar incidentes próximos de violar SLA
