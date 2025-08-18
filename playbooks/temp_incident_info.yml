@@ -11,6 +11,7 @@
       2: 30      # P2 - HIGH
       3: 90      # P3 - MEDIUM
       4: 180     # P4 - LOW
+      5: 9999 
     resolucao_minutos:
       1: 240     # P1 - 4h
       2: 900     # P2 - 15h
@@ -62,6 +63,7 @@
       when:
         - (opened_epoch | int) > 0
         - not tem_owner
+        - (item.priority | int) in nomeacao_minutos.keys()
         - (delta_open_sec | int) >= (nomeacao_minutos[item.priority | int] * 60)
 
     # --------- 2) Fora do prazo de resolução ---------
