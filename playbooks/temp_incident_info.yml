@@ -51,21 +51,22 @@
             (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('') ) | quote ) ~ ' +%s') | int)
               if (item.opened_at | default('') | length > 0) else 0
           }}
-        delta_open_sec: "{{ now_epoch - opened_epoch }}"
+        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
         sem_owner: "{{ (item.assigned_to | default('') | trim) == '' }}"
         novo_reg:
           number: "{{ item.number }}"
           sys_id: "{{ item.sys_id }}"
           short_description: "{{ item.short_description | default('') }}"
           opened_at: "{{ item.opened_at | default('') }}"
-          minutes_open: "{{ (delta_open_sec // 60) | int }}"
+          minutes_open: "{{ ((delta_open_sec | int) // 60) | int }}"
       loop: "{{ inc_all }}"
       loop_control:
         label: "{{ item.number | default('sem-number') }}"
       when:
-        - opened_epoch > 0
+        - (opened_epoch | int) > 0
         - sem_owner
-        - delta_open_sec <= (window_minutes_new * 60)
+        - (delta_open_sec | int) <= ((window_minutes_new | int) * 60)
+
 
     # --------- 1b) Velhos sem owner ---------
     - name: Classificar "Velhos sem owner"
