@@ -82,9 +82,9 @@
       loop_control:
         label: "{{ item.number | default('sem-number') }}"
       when:
-        - (opened_epoch | int) > 0
-        - (item.priority | int) in resolucao_minutos.keys()
-        - (delta_open_sec | int) >= (resolucao_minutos.get(item.priority | int, resolucao_minutos.default) * 60)
+       - (opened_epoch | int) > 0
+       - (delta_open_sec | int) >= (resolucao_minutos.get(item.priority | int, resolucao_minutos['default']) * 60)
+
 
     # --------- 3) Próximos de violar SLA (<= 60 min) ---------
     - name: Classificar incidentes próximos de violar SLA
