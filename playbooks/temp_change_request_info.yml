@@ -13,7 +13,7 @@
     target_ticket_number: "CHG0032689"
   # Entrada offline (sem chamadas ao ServiceNow aqui)
   vars_files:
-    - "vars.yml"    # deve conter: records: [...]
+    - "vars_change.yml"    # deve conter: records: [...]
 
   pre_tasks:
     - name: Validar 'records' do vars.yml
