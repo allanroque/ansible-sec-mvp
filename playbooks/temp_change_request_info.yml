@@ -421,3 +421,78 @@
         status_code: 200
       when:
         - google_chat_webhook_url is defined
+
+    # ------------------ Notificação Google Chat ------------------
+
+    - name: Calcular tempos do ticket alvo
+      set_fact:
+        opened_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d ' ~ ( (ticket_obj.opened_at | default('') ) | quote ) ~ ' +%s') | int)
+              if (ticket_obj.opened_at | default('') | length > 0) else 0
+          }}
+        updated_epoch: >-
+          {{
+            (lookup('pipe','date -u -d ' ~ ( (ticket_obj.sys_updated_on | default('') ) | quote ) ~ ' +%s') | int)
+              if (ticket_obj.sys_updated_on | default('') | length > 0) else 0
+          }}
+    - set_fact:
+        hours_open: "{{ ((now_epoch - opened_epoch) // 3600) if opened_epoch > 0 else 0 }}"
+        hours_since_update: "{{ ((now_epoch - updated_epoch) // 3600) if updated_epoch > 0 else 0 }}"
+
+    - name: Normalização de campos úteis
+      set_fact:
+        ticket_details:
+          number: "{{ ticket_obj.number | default('') }}"
+          sys_id: "{{ ticket_obj.sys_id | default('') }}"
+          short_description: "{{ ticket_obj.short_description | default('') }}"
+          description: "{{ ticket_obj.description | default('') }}"
+          assigned_to: >-
+            {{
+              (ticket_obj.assigned_to | default('') | string | trim)
+              if (ticket_obj.assigned_to is defined and (ticket_obj.assigned_to | string | trim) != '')
+              else 'None'
+            }}
+          priority: "{{ ticket_obj.priority | default('') }}"
+          state: "{{ ticket_obj.state | default('') }}"
+          category: "{{ ticket_obj.category | default('') }}"
+          opened_at: "{{ ticket_obj.opened_at | default('') }}"
+          sys_updated_on: "{{ ticket_obj.sys_updated_on | default('') }}"
+          hours_open: "{{ hours_open }}"
+          hours_since_update: "{{ hours_since_update }}"
+          sla_rule_name: >-
+            {% if ticket_obj.priority|int == 1 %} P1 - CRITICAL (15min nome / 4h resolver)
+            {% elif ticket_obj.priority|int == 2 %} P2 - HIGH (30min nome / 15h resolver)
+            {% elif ticket_obj.priority|int == 3 %} P3 - MEDIUM (90min nome / 60h resolver)
+            {% elif ticket_obj.priority|int == 4 %} P4 - LOW (180min nome / 120h resolver)
+            {% else %} SLA não definido {% endif %}
+
+    - name: Construir mensagem formatada
+      set_fact:
+        mensagem_ticket: |-
+          *Ticket:* {{ ticket_details.number }}
+          *Título:* {{ ticket_details.short_description }}
+          *Descrição:* {{ ticket_details.description }}
+          *Responsável:* {{ ticket_details.assigned_to }}
+          *Prioridade:* {{ ticket_details.priority }} ({{ ticket_details.sla_rule_name }})
+          *Estado:* {{ ticket_details.state }}
+          *Categoria:* {{ ticket_details.category }}
+          *Aberto em:* {{ ticket_details.opened_at }} ({{ ticket_details.hours_open }}h)
+          *Última atualização:* {{ ticket_details.sys_updated_on }} ({{ ticket_details.hours_since_update }}h)
+          *Sys ID:* {{ ticket_details.sys_id }}
+
+    - name: Pré-visualizar mensagem formatada
+      debug:
+        var: mensagem_ticket
+
+    - name: Enviar para Google Chat (opcional)
+      uri:
+        url: "{{ google_chat_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json; charset=UTF-8"
+        body_format: json
+        body:
+          text: "{{ mensagem_ticket }}"
+        status_code: 200
+      when: google_chat_webhook_url is defined
