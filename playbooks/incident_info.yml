@@ -18,15 +18,24 @@
     near_breach_minutes: 60  # SLA vence em <= X min
 
   pre_tasks:
+    - name: Resolver credenciais (vars → env) em nomes estáveis
+      set_fact:
+        sn_instance: "{{ (snow_instance is defined and snow_instance|length > 0)
+                         | ternary(snow_instance, (ansible_env.SN_HOST | default(''))) }}"
+        sn_username: "{{ (snow_username is defined and snow_username|length > 0)
+                         | ternary(snow_username, (ansible_env.SN_USERNAME | default(''))) }}"
+        sn_password: "{{ (snow_password is defined and snow_password|length > 0)
+                         | ternary(snow_password, (ansible_env.SN_PASSWORD | default(''))) }}"
+
     - name: Validar credenciais
       assert:
         that:
-          - snow_instance is defined and (snow_instance | length) > 0
-          - snow_username is defined and (snow_username | length) > 0
-          - snow_password is defined and (snow_password | length) > 0
+          - sn_instance | length > 0
+          - sn_username | length > 0
+          - sn_password | length > 0
         fail_msg: >
-          Defina snow_instance/snow_username/snow_password (ex.: via -e) OU exporte
-          SN_HOST/SN_USERNAME/SN_PASSWORD como variáveis de ambiente antes de rodar.
+          Defina snow_instance/snow_username/snow_password via -e
+          ou exporte SN_HOST/SN_USERNAME/SN_PASSWORD no ambiente.
 
 
   tasks:
