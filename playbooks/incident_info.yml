@@ -8,23 +8,35 @@
 
   vars:
     # Credenciais/instância (ideal: usar credencial no AAP)
-    host: "{{ SN_HOST }}"
-    username: "{{ SN_USERNAME }}"
-    password: "{{ SN_PASSWORD }}"
+    snow_instance: "{{ snow_instance | default(lookup('env','SN_HOST')) }}"
+    snow_username: "{{ snow_username | default(lookup('env','SN_USERNAME')) }}"
+    snow_password: "{{ snow_password | default(lookup('env','SN_PASSWORD')) }}"
 
     # Limites e janelas
     window_minutes_new: 15   # janela para "novos"
     stale_hours: 24          # sem update >= Xh
     near_breach_minutes: 60  # SLA vence em <= X min
 
+  pre_tasks:
+    - name: Validar credenciais
+      assert:
+        that:
+          - snow_instance is defined and (snow_instance | length) > 0
+          - snow_username is defined and (snow_username | length) > 0
+          - snow_password is defined and (snow_password | length) > 0
+        fail_msg: >
+          Defina snow_instance/snow_username/snow_password (ex.: via -e) OU exporte
+          SN_HOST/SN_USERNAME/SN_PASSWORD como variáveis de ambiente antes de rodar.
+
+
   tasks:
     # 1) Coleta única: todos incidentes ativos
     - name: Buscar incidentes abertos (active=true)
       servicenow.itsm.incident_info:
         instance:
-          host: "{{ SN_HOST }}"
-          username: "{{ SN_USERNAME }}"
-          password: "{{ SN_PASSWORD }}"
+          host: "{{ snow_instance }}"
+          username: "{{ snow_username }}"
+          password: "{{ snow_password }}"
         sysparm_query: "active=true"
         sysparm_display_value: "true"
       register: abertas
