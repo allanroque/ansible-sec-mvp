@@ -8,9 +8,9 @@
 
   vars:
     # Credenciais/instância (ideal: usar credencial no AAP)
-    host: "{{ snow_instance }}"
-    username: "{{ snow_username }}"
-    password: "{{ snow_password }}"
+    host: "{{ SN_HOST }}"
+    username: "{{ SN_USERNAME }}"
+    password: "{{ SN_PASSWORD }}"
 
     # Limites e janelas
     window_minutes_new: 15   # janela para "novos"
@@ -22,9 +22,9 @@
     - name: Buscar incidentes abertos (active=true)
       servicenow.itsm.incident_info:
         instance:
-          host: "{{ snow_instance }}"
-          username: "{{ snow_username }}"
-          password: "{{ snow_password }}"
+          host: "{{ SN_HOST }}"
+          username: "{{ SN_USERNAME }}"
+          password: "{{ SN_PASSWORD }}"
         sysparm_query: "active=true"
         sysparm_display_value: "true"
       register: abertas
