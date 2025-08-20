@@ -7,10 +7,6 @@
     - servicenow.itsm
 
   vars:
-    # Credenciais/instância (ideal: usar credencial no AAP)
-    snow_instance: "{{ snow_instance | default(lookup('env','SN_HOST')) }}"
-    snow_username: "{{ snow_username | default(lookup('env','SN_USERNAME')) }}"
-    snow_password: "{{ snow_password | default(lookup('env','SN_PASSWORD')) }}"
 
     # Limites e janelas
     window_minutes_new: 15   # janela para "novos"
