@@ -9,6 +9,7 @@
   vars:
     # Regras SLA em minutos
     near_breach_minutes: 60
+    window_minutes_new: 15
     nomeacao_minutos:
       1: 15      # P1 - CRITICAL
       2: 30      # P2 - HIGH
@@ -60,6 +61,10 @@
         sysparm_display_value: "true"
       register: abertas
 
+    - name: Contagem total
+      debug:
+        msg: "Total de incidentes abertos encontrados: {{ abertas.records | length }}"
+
     - name: Normalizar lista de incidentes
       set_fact:
         inc_all: "{{ abertas.records | default([]) }}"
@@ -73,6 +78,24 @@
         fora_nomeacao: []
         fora_resolucao: []
         near_breach: []
+        novos: []
+
+    # --------- NOVOS (≤ janela) ---------
+    - name: Adicionar em NOVOS quando opened_at <= {{ window_minutes_new }} min atrás
+      set_fact:
+        novos: "{{ novos + [ item ] }}"
+      vars:
+        opened_epoch: >-
+          {{
+            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
+          }}
+        delta_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
+      loop: "{{ inc_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
+      when:
+        - (opened_epoch | int) > 0
+        - (delta_sec | int) <= (window_minutes_new | int) * 60
 
     # --------- Fora do prazo de nomeação ---------
     - name: Classificar incidentes fora do prazo de nomeação
@@ -81,8 +104,7 @@
       vars:
         opened_epoch: >-
           {{
-            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('')) | quote ) ~ ' +%s') | int)
-              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
+            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
           }}
         delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
         tem_owner: >-
@@ -103,8 +125,7 @@
       vars:
         opened_epoch: >-
           {{
-            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('')) | quote ) ~ ' +%s') | int)
-              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
+            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
           }}
         delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
       loop: "{{ inc_all }}"
@@ -121,8 +142,7 @@
       vars:
         opened_epoch: >-
           {{
-            (lookup('pipe', 'date -u -d ' ~ ( (item.opened_at | default('')) | quote ) ~ ' +%s') | int)
-              if (item.opened_at is defined and (item.opened_at | string | length) > 0) else 0
+            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
           }}
         deadline_epoch: >-
           {{
@@ -142,6 +162,7 @@
     - name: Contagens por bucket
       debug:
         msg:
+          - "Novos (≤{{ window_minutes_new }}min): {{ novos | length }}"
           - "Fora do prazo de nomeação: {{ fora_nomeacao | length }}"
           - "Fora do prazo de resolução: {{ fora_resolucao | length }}"
           - "Próximos de violar SLA (≤{{ near_breach_minutes }}min): {{ near_breach | length }}"
@@ -149,6 +170,7 @@
     - name: Listas simples por bucket
       debug:
         msg:
+          novos: "{{ novos | map(attribute='number') | list }}"
           fora_nomeacao: "{{ fora_nomeacao | map(attribute='number') | list }}"
           fora_resolucao: "{{ fora_resolucao | map(attribute='number') | list }}"
           near_breach: "{{ near_breach | map(attribute='number') | list }}"
@@ -158,10 +180,12 @@
       set_fact:
         chat_text: |-
           *Resumo SLA Incidentes*
+          - Novos (≤{{ window_minutes_new }}min): {{ novos | length }}
           - Fora do prazo de nomeação: {{ fora_nomeacao | length }}
           - Fora do prazo de resolução: {{ fora_resolucao | length }}
           - Próximos de violar SLA (≤{{ near_breach_minutes }}min): {{ near_breach | length }}
 
+          *Tickets novos:* {{ novos | map(attribute='number') | list }}
           *Tickets fora nomeação:* {{ fora_nomeacao | map(attribute='number') | list }}
           *Tickets fora resolução:* {{ fora_resolucao | map(attribute='number') | list }}
           *Tickets próximos SLA:* {{ near_breach | map(attribute='number') | list }}
