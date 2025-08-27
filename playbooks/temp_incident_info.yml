@@ -31,6 +31,12 @@
           - records | type_debug == 'list'
         fail_msg: "Esperava 'records' como lista em vars_incident.yml."
 
+    - name: Mostrar credenciais resolvidas (sem senha)
+      debug:
+        msg:
+          - "ServiceNow instance: {{ sn_instance }}"
+          - "ServiceNow username: {{ sn_username }}"
+
   tasks:
     - name: Epoch atual (UTC)
       set_fact:
