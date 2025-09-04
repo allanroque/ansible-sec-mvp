@@ -177,8 +177,7 @@
           near_breach: "{{ near_breach | map(attribute='number') | list }}"
 
     # --------- Notificação Google Chat ---------
-    # --------- Montar detalhes por incidente ---------
-    - name: Montar detalhes por incidente
+    - name: Montar detalhes por incidente (com quebras de linha reais)
       set_fact:
         incident_details: >-
           {{
@@ -201,10 +200,9 @@
           }}
       loop: "{{ inc_all }}"
 
-    # --------- Notificação Google Chat ---------
-    - name: Montar mensagem final
+    - name: Montar mensagem final com resumo + detalhes
       set_fact:
-        chat_text: |-
+        chat_text: |
           *Resumo SLA Incidentes*
           - Novos (≤{{ window_minutes_new }}min): {{ novos | length }}
           - Fora do prazo de nomeação: {{ fora_nomeacao | length }}
