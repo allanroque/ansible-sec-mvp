@@ -46,9 +46,9 @@
     - name: Criar incidentes de teste
       servicenow.itsm.incident:
         instance:
-          host: "{{ sn_instance }}"
-          username: "{{ sn_username }}"
-          password: "{{ sn_password }}"
+          host: "{{ lookup('env', 'SN_HOST') }}"
+          username: "{{ lookup('env', 'SN_USERNAME') }}"
+          password: "{{ lookup('env', 'SN_PASSWORD') }}"
         state: present
         short_description: "Incidente de teste automático - Categoria {{ item }}"
         description: "Criado automaticamente para teste de SLA (Categoria: {{ item }})"
