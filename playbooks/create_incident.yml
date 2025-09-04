@@ -1,5 +1,5 @@
 ---
-- name: Criar incidentes de teste no ServiceNow
+- name: Criar incidentes de teste no ServiceNow com categorias diferentes
   hosts: localhost
   connection: local
   gather_facts: false
@@ -11,27 +11,30 @@
     sn_username: "{{ lookup('env', 'SN_USERNAME') }}"
     sn_password: "{{ lookup('env', 'SN_PASSWORD') }}"
 
-    # Quantos incidentes criar por execução
-    incident_count: 3
-
-    # Possíveis prioridades
-    incident_priorities: [1, 2, 3, 4]
+    categorias_teste:
+      - Software
+      - Hardware
+      - Network
 
   tasks:
-    - name: Criar incidentes dummy
+    - name: Criar incidentes de teste
       servicenow.itsm.incident:
         instance:
           host: "{{ sn_instance }}"
           username: "{{ sn_username }}"
           password: "{{ sn_password }}"
         state: present
-        short_description: "Incidente de teste automático - {{ item }}"
-        description: "Incidente gerado automaticamente para testes de SLA e dashboards."
-        priority: "{{ (incident_priorities | random) }}"
-        caller: "Automacao Ansible"
-      loop: "{{ range(1, incident_count + 1) | list }}"
-      register: incidentes_criados
+        short_description: "Incidente de teste automático - Categoria {{ item }}"
+        description: "Este incidente foi criado automaticamente pelo Ansible para fins de teste (Categoria: {{ item }})"
+        impact: 3        # Low
+        urgency: 2       # Medium
+        caller: "Anshul Demouser"
+        other:
+          category: "{{ item }}"
+          work_notes: "Criado automaticamente para testes de SLA"
+      loop: "{{ categorias_teste }}"
+      register: incidentes
 
-    - name: Mostrar IDs criados
+    - name: Mostrar incidentes criados
       debug:
-        var: incidentes_criados.results | map(attribute='record.number') | list
+        msg: "Incidentes criados: {{ incidentes.results | map(attribute='record.number') | list }}"
