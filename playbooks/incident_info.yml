@@ -24,21 +24,24 @@
       default: 999999
 
   pre_tasks:
-    - name: Resolver credenciais (Credential Type → env)
+    - name: Resolver credenciais (vars → env)
       set_fact:
-        sn_instance: "{{ lookup('env', 'SN_HOST') }}"
-        sn_username: "{{ lookup('env', 'SN_USERNAME') }}"
-        sn_password: "{{ lookup('env', 'SN_PASSWORD') }}"
+        sn_instance: "{{ (snow_instance is defined and snow_instance|length > 0)
+                         | ternary(snow_instance, (ansible_env.SN_HOST | default(''))) }}"
+        sn_username: "{{ (snow_username is defined and snow_username|length > 0)
+                         | ternary(snow_username, (ansible_env.SN_USERNAME | default(''))) }}"
+        sn_password: "{{ (snow_password is defined and snow_password|length > 0)
+                         | ternary(snow_password, (ansible_env.SN_PASSWORD | default(''))) }}"
 
     - name: Validar credenciais
       assert:
         that:
-          - sn_instance is match("https?://.+")
+          - sn_instance | length > 0
           - sn_username | length > 0
           - sn_password | length > 0
         fail_msg: >
-          As credenciais do ServiceNow não foram resolvidas.
-          Verifique se o Credential Type está configurado corretamente.
+          Defina snow_instance/snow_username/snow_password via -e
+          ou exporte SN_HOST/SN_USERNAME/SN_PASSWORD no ambiente.
 
     - name: Mostrar credenciais resolvidas (sem senha)
       debug:
@@ -51,9 +54,9 @@
     - name: Buscar incidentes abertos (active=true)
       servicenow.itsm.incident_info:
         instance:
-          host: "{{ lookup('env', 'SN_HOST') }}"
-          username: "{{ lookup('env', 'SN_USERNAME') }}"
-          password: "{{ lookup('env', 'SN_PASSWORD') }}"
+          host: "{{ sn_instance }}"
+          username: "{{ sn_username }}"
+          password: "{{ sn_password }}"
         sysparm_query: "active=true"
 #        sysparm_query: "active=true^assignment_group.name=Instruqt"
         sysparm_display_value: "true"
