@@ -51,14 +51,17 @@
           password: "{{ sn_password }}"
         state: present
         short_description: "Incidente de teste automático - Categoria {{ item }}"
-        description: "Este incidente foi criado automaticamente pelo Ansible para fins de teste (Categoria: {{ item }})"
-        impact: 3        # Low
-        urgency: 2       # Medium
+        description: "Criado automaticamente para teste de SLA (Categoria: {{ item }})"
+        impact: 3
+        urgency: 2
         caller: "Anshul Demouser"
         other:
           category: "{{ item }}"
-          work_notes: "Criado automaticamente para testes de SLA"
-      loop: "{{ categorias_teste }}"
+          work_notes: "Criado automaticamente via Ansible para testes"
+      loop:
+        - Software
+        - Hardware
+        - Network
       register: incidentes
 
     - name: Mostrar incidentes criados
