@@ -1,0 +1,37 @@
+---
+- name: Criar incidentes de teste no ServiceNow
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - servicenow.itsm
+
+  vars:
+    sn_instance: "{{ lookup('env', 'SN_HOST') }}"
+    sn_username: "{{ lookup('env', 'SN_USERNAME') }}"
+    sn_password: "{{ lookup('env', 'SN_PASSWORD') }}"
+
+    # Quantos incidentes criar por execução
+    incident_count: 3
+
+    # Possíveis prioridades
+    incident_priorities: [1, 2, 3, 4]
+
+  tasks:
+    - name: Criar incidentes dummy
+      servicenow.itsm.incident:
+        instance:
+          host: "{{ sn_instance }}"
+          username: "{{ sn_username }}"
+          password: "{{ sn_password }}"
+        state: present
+        short_description: "Incidente de teste automático - {{ item }}"
+        description: "Incidente gerado automaticamente para testes de SLA e dashboards."
+        priority: "{{ (incident_priorities | random) }}"
+        caller: "Automacao Ansible"
+      loop: "{{ range(1, incident_count + 1) | list }}"
+      register: incidentes_criados
+
+    - name: Mostrar IDs criados
+      debug:
+        var: incidentes_criados.results | map(attribute='record.number') | list
