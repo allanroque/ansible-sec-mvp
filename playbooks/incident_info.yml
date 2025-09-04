@@ -51,9 +51,9 @@
     - name: Buscar incidentes abertos (active=true)
       servicenow.itsm.incident_info:
         instance:
-          host: "{{ sn_instance }}"
-          username: "{{ sn_username }}"
-          password: "{{ sn_password }}"
+          host: "{{ lookup('env', 'SN_HOST') }}"
+          username: "{{ lookup('env', 'SN_USERNAME') }}"
+          password: "{{ lookup('env', 'SN_PASSWORD') }}"
         sysparm_query: "active=true"
 #        sysparm_query: "active=true^assignment_group.name=Instruqt"
         sysparm_display_value: "true"
