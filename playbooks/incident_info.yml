@@ -206,3 +206,32 @@
           text: "{{ chat_text }}"
         status_code: 200
       when: google_chat_webhook_url is defined
+
+    - name: Montar detalhes por incidente
+      set_fact:
+        incident_details: >-
+          {{
+            incident_details | default([]) +
+            [(
+              "Ticket: " ~ (item.number | default("N/A")) ~ "\n" ~
+              "Título: " ~ (item.short_description | default("N/A")) ~ "\n" ~
+              "Descrição: " ~ (item.description | default("N/A")) ~ "\n" ~
+              "Responsável: " ~ (item.assigned_to | default("None")) ~ "\n" ~
+              "Prioridade: " ~ (item.priority | default("N/A") | string) ~ "\n" ~
+              "Estado: " ~ (item.state | default("N/A") | string) ~ "\n" ~
+              "Categoria: " ~ (item.category | default("N/A")) ~ "\n" ~
+              "Aberto em: " ~ (item.opened_at | default("N/A")) ~ "\n" ~
+              "Última atualização: " ~ (item.sys_updated_on | default("N/A")) ~ "\n" ~
+              "Assignment group: " ~ (item.assignment_group | default("")) ~ "\n" ~
+              "On hold: " ~ (item.hold_reason | default("false") | string) ~ "\n" ~
+              "Aprovação: " ~ (item.approval | default("N/A")) ~ "\n" ~
+              "Made SLA: " ~ (item.made_sla | default("N/A") | string) ~ "\n" ~
+              "SLA due: " ~ (item.sla_due | default("N/A")) ~ "\n" ~
+              "Sys ID: " ~ (item.sys_id | default("N/A"))
+            )]
+          }}
+      loop: "{{ inc_all }}"
+
+    - name: Mostrar incidentes detalhados
+      debug:
+        var: incident_details
