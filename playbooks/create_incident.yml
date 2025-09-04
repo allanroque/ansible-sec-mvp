@@ -1,4 +1,3 @@
----
 - name: Criar incidentes de teste no ServiceNow com categorias diferentes
   hosts: localhost
   connection: local
@@ -7,40 +6,10 @@
     - servicenow.itsm
 
   vars:
-    sn_instance: "{{ lookup('env', 'SN_HOST') }}"
-    sn_username: "{{ lookup('env', 'SN_USERNAME') }}"
-    sn_password: "{{ lookup('env', 'SN_PASSWORD') }}"
-
     categorias_teste:
       - Software
       - Hardware
       - Network
-
-  pre_tasks:
-    - name: Resolver credenciais (vars → env)
-      set_fact:
-        sn_instance: "{{ (snow_instance is defined and snow_instance|length > 0)
-                         | ternary(snow_instance, (ansible_env.SN_HOST | default(''))) }}"
-        sn_username: "{{ (snow_username is defined and snow_username|length > 0)
-                         | ternary(snow_username, (ansible_env.SN_USERNAME | default(''))) }}"
-        sn_password: "{{ (snow_password is defined and snow_password|length > 0)
-                         | ternary(snow_password, (ansible_env.SN_PASSWORD | default(''))) }}"
-
-    - name: Validar credenciais
-      assert:
-        that:
-          - sn_instance | length > 0
-          - sn_username | length > 0
-          - sn_password | length > 0
-        fail_msg: >
-          Defina snow_instance/snow_username/snow_password via -e
-          ou exporte SN_HOST/SN_USERNAME/SN_PASSWORD no ambiente.
-
-    - name: Mostrar credenciais resolvidas (sem senha)
-      debug:
-        msg:
-          - "ServiceNow instance: {{ sn_instance }}"
-          - "ServiceNow username: {{ sn_username }}"
 
   tasks:
     - name: Criar incidentes de teste
@@ -54,14 +23,11 @@
         description: "Criado automaticamente para teste de SLA (Categoria: {{ item }})"
         impact: 3
         urgency: 2
-        caller: "Anshul Demouser"
+        caller: "{{ sn_username }}"   # usar o mesmo usuário que você já autenticou
         other:
           category: "{{ item }}"
           work_notes: "Criado automaticamente via Ansible para testes"
-      loop:
-        - Software
-        - Hardware
-        - Network
+      loop: "{{ categorias_teste }}"
       register: incidentes
 
     - name: Mostrar incidentes criados
