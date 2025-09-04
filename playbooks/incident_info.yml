@@ -177,6 +177,31 @@
           near_breach: "{{ near_breach | map(attribute='number') | list }}"
 
     # --------- Notificação Google Chat ---------
+    # --------- Montar detalhes por incidente ---------
+    - name: Montar detalhes por incidente
+      set_fact:
+        incident_details: >-
+          {{
+            incident_details | default([]) +
+            [(
+              "*Ticket:* " ~ (item.number | default("N/A")) ~ "\n"
+              ~ "*Título:* " ~ (item.short_description | default("N/A")) ~ "\n"
+              ~ "*Descrição:* " ~ (item.description | default("N/A")) ~ "\n"
+              ~ "*Responsável:* " ~ (item.assigned_to | default("None")) ~ "\n"
+              ~ "*Prioridade:* " ~ (item.priority | default("N/A") | string) ~ "\n"
+              ~ "*Estado:* " ~ (item.state | default("N/A") | string) ~ "\n"
+              ~ "*Categoria:* " ~ (item.category | default("N/A")) ~ "\n"
+              ~ "*Aberto em:* " ~ (item.opened_at | default("N/A")) ~ "\n"
+              ~ "*Última atualização:* " ~ (item.sys_updated_on | default("N/A")) ~ "\n"
+              ~ "*Assignment group:* " ~ (item.assignment_group | default("")) ~ "\n"
+              ~ "*Aprovação:* " ~ (item.approval | default("N/A")) ~ "\n"
+              ~ "*Made SLA:* " ~ (item.made_sla | default("N/A") | string) ~ "\n"
+              ~ "*Sys ID:* " ~ (item.sys_id | default("N/A"))
+            )]
+          }}
+      loop: "{{ inc_all }}"
+
+    # --------- Notificação Google Chat ---------
     - name: Montar mensagem final
       set_fact:
         chat_text: |-
@@ -190,6 +215,9 @@
           *Tickets fora nomeação:* {{ fora_nomeacao | map(attribute='number') | list }}
           *Tickets fora resolução:* {{ fora_resolucao | map(attribute='number') | list }}
           *Tickets próximos SLA:* {{ near_breach | map(attribute='number') | list }}
+
+          *Detalhes dos incidentes:*
+          {{ incident_details | join('\n\n---\n\n') }}
 
     - name: Pré-visualizar mensagem
       debug:
@@ -207,31 +235,3 @@
         status_code: 200
       when: google_chat_webhook_url is defined
 
-    - name: Montar detalhes por incidente
-      set_fact:
-        incident_details: >-
-          {{
-            incident_details | default([]) +
-            [(
-              "Ticket: " ~ (item.number | default("N/A")) ~ "\n" ~
-              "Título: " ~ (item.short_description | default("N/A")) ~ "\n" ~
-              "Descrição: " ~ (item.description | default("N/A")) ~ "\n" ~
-              "Responsável: " ~ (item.assigned_to | default("None")) ~ "\n" ~
-              "Prioridade: " ~ (item.priority | default("N/A") | string) ~ "\n" ~
-              "Estado: " ~ (item.state | default("N/A") | string) ~ "\n" ~
-              "Categoria: " ~ (item.category | default("N/A")) ~ "\n" ~
-              "Aberto em: " ~ (item.opened_at | default("N/A")) ~ "\n" ~
-              "Última atualização: " ~ (item.sys_updated_on | default("N/A")) ~ "\n" ~
-              "Assignment group: " ~ (item.assignment_group | default("")) ~ "\n" ~
-              "On hold: " ~ (item.hold_reason | default("false") | string) ~ "\n" ~
-              "Aprovação: " ~ (item.approval | default("N/A")) ~ "\n" ~
-              "Made SLA: " ~ (item.made_sla | default("N/A") | string) ~ "\n" ~
-              "SLA due: " ~ (item.sla_due | default("N/A")) ~ "\n" ~
-              "Sys ID: " ~ (item.sys_id | default("N/A"))
-            )]
-          }}
-      loop: "{{ inc_all }}"
-
-    - name: Mostrar incidentes detalhados
-      debug:
-        var: incident_details
