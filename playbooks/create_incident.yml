@@ -57,6 +57,7 @@
         caller: "{{ sn_username }}"   # usar o mesmo usuário que você já autenticou
         other:
           category: "{{ item }}"
+          assignment_group: "Instruqt"
           work_notes: "Criado automaticamente via Ansible para testes"
       loop: "{{ categorias_teste }}"
       register: incidentes
