@@ -59,8 +59,8 @@
           host: "{{ sn_instance }}"
           username: "{{ sn_username }}"
           password: "{{ sn_password }}"
-        sysparm_query: "active=true"
-#        sysparm_query: "active=true^assignment_group.name=Instruqt"
+#        sysparm_query: "active=true"
+        sysparm_query: "active=true^assignment_group.name=TD-CYBEROPS-CSIRT-BR"
         sysparm_display_value: "true"
       register: abertas
 
