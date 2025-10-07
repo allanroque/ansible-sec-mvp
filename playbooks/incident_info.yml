@@ -1,31 +1,51 @@
 ---
-- name: Incidentes abertos + classificação SLA + notificação
+- name: Incidentes (ServiceNow) -> classificação de SLA -> Google Chat
   hosts: localhost
   connection: local
   gather_facts: false
-  vars:
-    ansible_verbosity: 4
   collections:
     - servicenow.itsm
 
   vars:
-    # Regras SLA em minutos
+    # ======== Regras de SLA (minutos) ========
     near_breach_minutes: 60
     window_minutes_new: 15
     nomeacao_minutos:
-      1: 15      # P1 - CRITICAL
-      2: 30      # P2 - HIGH
-      3: 90      # P3 - MEDIUM
-      4: 180     # P4 - LOW
+      1: 15
+      2: 30
+      3: 90
+      4: 180
       5: 9999
     resolucao_minutos:
-      1: 240     # P1 - 4h
-      2: 900     # P2 - 15h
-      3: 3600    # P3 - 2,5 dias
-      4: 7200    # P4 - 5 dias
-      default: 999999
+      1: 240
+      2: 900
+      3: 3600
+      4: 7200
+      default: 14400
+
+    # ======== Google Chat ========
+    google_chat_webhook_url: "{{ google_chat_webhook_url | default(omit) }}"
+    chat_detail_buckets:
+      - fora_nomeacao
+      - fora_resolucao
+      - near_breach
+      # - closed_recent   # descomente se quiser detalhar resolvidos recentes também
+
+    # ======== “Resolvidos recentes” ========
+    include_closed_days: 30   # janela (dias)
+
+    # ======== Mapa de estados ========
+    state_map:
+      "1": New
+      "2": In Progress
+      "3": On Hold
+      "6": Resolved
+      "7": Closed
+      "8": Canceled
 
   pre_tasks:
+    # Credenciais podem vir por -e (snow_instance, snow_username, snow_password)
+    # ou pelas variáveis de ambiente: SN_HOST / SN_USERNAME / SN_PASSWORD
     - name: Resolver credenciais (vars → env)
       set_fact:
         sn_instance: "{{ (snow_instance is defined and snow_instance|length > 0)
@@ -52,186 +72,295 @@
           - "ServiceNow username: {{ sn_username }}"
 
   tasks:
-    # ---------- Coletar incidentes no ServiceNow ----------
-    - name: Buscar incidentes abertos (active=true)
+    # ================== COLETA (ServiceNow) ==================
+    - name: Buscar incidentes abertos (active=true) no grupo (ajuste a query se precisar)
       servicenow.itsm.incident_info:
         instance:
           host: "{{ sn_instance }}"
           username: "{{ sn_username }}"
           password: "{{ sn_password }}"
-#        sysparm_query: "active=true"
+        # Ex.: apenas abertos do grupo xxxx BR:
         sysparm_query: "active=true^assignment_group.name=TD-CYBEROPS-CSIRT-BR"
-        sysparm_display_value: "true"
+        #sysparm_query: "active=true"   # <-- use isto para buscar todos abertos
+        sysparm_display_value: "true"   # retorna nomes legíveis em campos de referência
       register: abertas
 
-    - name: Contagem total
+    - name: Normalizar lista de incidentes (cru)
+      set_fact:
+        inc_all_raw: "{{ abertas.records | default([]) }}"
+
+    # Só “abertos/ativos” para os buckets de SLA (exclui state 6)
+    - name: Filtrar incidentes ativos/abertos (flex)
+      set_fact:
+        inc_all: >-
+          {{
+            (
+              (inc_all_raw | selectattr('active', 'equalto', 'true')) +
+              (inc_all_raw | selectattr('active', 'equalto', true))
+            )
+            | selectattr('incident_state', 'defined')
+            | rejectattr('incident_state', 'equalto', '6')
+            | rejectattr('incident_state', 'equalto', 6)
+            | list
+          }}
+
+    - name: Contagem total considerada (abertos/ativos)
       debug:
-        msg: "Total de incidentes abertos encontrados: {{ abertas.records | length }}"
+        msg: "Total de incidentes considerados (abertos): {{ inc_all | length }}"
 
-    - name: Normalizar lista de incidentes
+    # ================== CORTES / EPOCH (sem shell) ==================
+    - name: Epoch atual (UTC) para cortes
       set_fact:
-        inc_all: "{{ abertas.records | default([]) }}"
+        now_epoch: "{{ '%s' | strftime | int }}"
 
-    - name: Epoch atual (UTC)
+    # ================== “RESOLVIDOS RECENTES” (por STRING) ==================
+    - name: Gerar data/hora de corte (string UTC) para resolvidos recentes
       set_fact:
-        now_epoch: "{{ lookup('pipe','date -u +%s') | int }}"
+        closed_cut_dt_str: >-
+          {{
+            '%Y-%m-%d %H:%M:%S'
+            | strftime( (now_epoch | int) - ((include_closed_days | int) * 86400), utc=True )
+          }}
 
-    - name: Inicializar buckets
+    - name: Inicializar coleção de resolvidos recentes
+      set_fact:
+        inc_closed_recent: []
+
+    - name: Coletar incidentes resolvidos nos últimos {{ include_closed_days }} dias
+      set_fact:
+        inc_closed_recent: "{{ inc_closed_recent + [ item ] }}"
+      loop: "{{ inc_all_raw }}"
+      loop_control: { label: "{{ item.number | default('sem-number') }}" }
+      when:
+        - item.incident_state is defined
+        - (item.incident_state | string) == '6'
+        - (item.resolved_at | default('') | string | length) > 0
+        - (item.resolved_at | string) >= (closed_cut_dt_str | string)
+
+    # ================== CLASSIFICAÇÃO (ABERTOS, por STRING) ==================
+    - name: Inicializar buckets (abertos)
       set_fact:
         fora_nomeacao: []
         fora_resolucao: []
         near_breach: []
         novos: []
 
-    # --------- NOVOS (≤ janela) ---------
-    - name: Adicionar em NOVOS quando opened_at <= {{ window_minutes_new }} min atrás
+    # --- NOVOS (<= janela) ---
+    - name: Corte para NOVOS (<= janela)
+      set_fact:
+        cutoff_new_str: >-
+          {{
+            '%Y-%m-%d %H:%M:%S'
+            | strftime( (now_epoch | int) - ((window_minutes_new | int) * 60), utc=True )
+          }}
+
+    - name: Classificar incidentes NOVOS (<= {{ window_minutes_new }} min)
       set_fact:
         novos: "{{ novos + [ item ] }}"
-      vars:
-        opened_epoch: >-
-          {{
-            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
-          }}
-        delta_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
       loop: "{{ inc_all }}"
-      loop_control:
-        label: "{{ item.number | default('sem-number') }}"
+      loop_control: { label: "{{ item.number | default('sem-number') }}" }
+      vars:
+        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
       when:
-        - (opened_epoch | int) > 0
-        - (delta_sec | int) <= (window_minutes_new | int) * 60
+        - (opened_str | length) > 0
+        - (opened_str | string) >= (cutoff_new_str | string)
 
-    # --------- Fora do prazo de nomeação ---------
-    - name: Classificar incidentes fora do prazo de nomeação
+    # --- FORA DO PRAZO DE NOMEAÇÃO ---
+    - name: Classificar incidentes FORA DO PRAZO DE NOMEAÇÃO
       set_fact:
         fora_nomeacao: "{{ fora_nomeacao + [ item ] }}"
-      vars:
-        opened_epoch: >-
-          {{
-            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
-          }}
-        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
-        tem_owner: >-
-          {{ (item.assigned_to is defined) and ((item.assigned_to | string | trim) != '') }}
       loop: "{{ inc_all }}"
-      loop_control:
-        label: "{{ item.number | default('sem-number') }}"
+      loop_control: { label: "{{ item.number | default('sem-number') }}" }
+      vars:
+        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
+        prio: "{{ (item.priority | default(5)) | int }}"
+        limite_nomeacao_sec: "{{ (nomeacao_minutos.get(prio, 9999) | int) * 60 }}"
+        cutoff_nomeacao_str: >-
+          {{
+            '%Y-%m-%d %H:%M:%S'
+            | strftime( (now_epoch | int) - (limite_nomeacao_sec | int), utc=True )
+          }}
+        tem_owner: "{{ (item.assigned_to is defined) and ((item.assigned_to | string | trim) != '') }}"
       when:
-        - (opened_epoch | int) > 0
+        - (opened_str | length) > 0
         - not tem_owner
-        - (item.priority | int) in nomeacao_minutos.keys()
-        - (delta_open_sec | int) >= (nomeacao_minutos[item.priority | int] * 60)
+        - (opened_str | string) <= (cutoff_nomeacao_str | string)
 
-    # --------- Fora do prazo de resolução ---------
-    - name: Classificar incidentes fora do prazo de resolução
+    # --- FORA DO PRAZO DE RESOLUÇÃO ---
+    - name: Classificar incidentes FORA DO PRAZO DE RESOLUÇÃO
       set_fact:
         fora_resolucao: "{{ fora_resolucao + [ item ] }}"
-      vars:
-        opened_epoch: >-
-          {{
-            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
-          }}
-        delta_open_sec: "{{ (now_epoch | int) - (opened_epoch | int) }}"
       loop: "{{ inc_all }}"
-      loop_control:
-        label: "{{ item.number | default('sem-number') }}"
+      loop_control: { label: "{{ item.number | default('sem-number') }}" }
+      vars:
+        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
+        prio: "{{ (item.priority | default(5)) | int }}"
+        limite_resolucao_sec: "{{ (resolucao_minutos.get(prio, resolucao_minutos['default']) | int) * 60 }}"
+        cutoff_resolucao_str: >-
+          {{
+            '%Y-%m-%d %H:%M:%S'
+            | strftime( (now_epoch | int) - (limite_resolucao_sec | int), utc=True )
+          }}
       when:
-        - (opened_epoch | int) > 0
-        - (delta_open_sec | int) >= (resolucao_minutos.get(item.priority | int, resolucao_minutos['default']) * 60)
+        - (opened_str | length) > 0
+        - (opened_str | string) <= (cutoff_resolucao_str | string)
 
-    # --------- Próximos de violar SLA ---------
-    - name: Classificar incidentes próximos de violar SLA
+    # --- PRÓXIMOS DE VIOLAR SLA (janela) ---
+    - name: Classificar incidentes PRÓXIMOS DE VIOLAR SLA (<= {{ near_breach_minutes }} min)
       set_fact:
         near_breach: "{{ near_breach + [ item ] }}"
+      loop: "{{ inc_all }}"
+      loop_control: { label: "{{ item.number | default('sem-number') }}" }
       vars:
-        opened_epoch: >-
+        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
+        prio: "{{ (item.priority | default(5)) | int }}"
+        limite_resolucao_sec: "{{ (resolucao_minutos.get(prio, resolucao_minutos['default']) | int) * 60 }}"
+        nb_sec: "{{ (near_breach_minutes | int) * 60 }}"
+        lower_sec: "{{ (limite_resolucao_sec | int) - (nb_sec | int) }}"
+        lower_sec_norm: "{{ (lower_sec | int) if (lower_sec | int) > 0 else 0 }}"
+        c1_str: >-
           {{
-            (lookup('pipe', 'date -u -d "' ~ (item.opened_at | default('1970-01-01 00:00:00')) ~ '" +%s') | int)
+            '%Y-%m-%d %H:%M:%S'
+            | strftime( (now_epoch | int) - (limite_resolucao_sec | int), utc=True )
           }}
-        deadline_epoch: >-
+        c2_str: >-
           {{
-            (opened_epoch | int)
-            + (resolucao_minutos.get(item.priority | int, resolucao_minutos['default']) * 60)
+            '%Y-%m-%d %H:%M:%S'
+            | strftime( (now_epoch | int) - (lower_sec_norm | int), utc=True )
           }}
-        time_left_sec: "{{ (deadline_epoch | int) - (now_epoch | int) }}"
-      loop: "{{ inc_all }}"
-      loop_control:
-        label: "{{ item.number | default('sem-number') }}"
       when:
-        - (opened_epoch | int) > 0
-        - (time_left_sec | int) > 0
-        - (time_left_sec | int) <= (near_breach_minutes | int) * 60
+        - (opened_str | length) > 0
+        - (opened_str | string) >  (c1_str | string)
+        - (opened_str | string) <= (c2_str | string)
 
-    # ------------------ Saídas / Resumo ------------------
-    - name: Contagens por bucket
+    # ================== RESUMO ==================
+    - name: Resumo e listas por bucket
       debug:
         msg:
-          - "Novos (≤{{ window_minutes_new }}min): {{ novos | length }}"
-          - "Fora do prazo de nomeação: {{ fora_nomeacao | length }}"
-          - "Fora do prazo de resolução: {{ fora_resolucao | length }}"
-          - "Próximos de violar SLA (≤{{ near_breach_minutes }}min): {{ near_breach | length }}"
+          resumo:
+            novos: "{{ novos | length }}"
+            fora_nomeacao: "{{ fora_nomeacao | length }}"
+            fora_resolucao: "{{ fora_resolucao | length }}"
+            near_breach: "{{ near_breach | length }}"
+            closed_recent: "{{ inc_closed_recent | length }}"
+            total_incidentes_abertos: "{{ inc_all | length }}"
+          tickets:
+            novos: "{{ novos | map(attribute='number') | list | default([]) }}"
+            fora_nomeacao: "{{ fora_nomeacao | map(attribute='number') | list | default([]) }}"
+            fora_resolucao: "{{ fora_resolucao | map(attribute='number') | list | default([]) }}"
+            near_breach: "{{ near_breach | map(attribute='number') | list | default([]) }}"
+            closed_recent: "{{ inc_closed_recent | map(attribute='number') | list | default([]) }}"
 
-    - name: Listas simples por bucket
-      debug:
-        msg:
-          novos: "{{ novos | map(attribute='number') | list }}"
-          fora_nomeacao: "{{ fora_nomeacao | map(attribute='number') | list }}"
-          fora_resolucao: "{{ fora_resolucao | map(attribute='number') | list }}"
-          near_breach: "{{ near_breach | map(attribute='number') | list }}"
-
-    # --------- Notificação Google Chat ---------
-    - name: Montar detalhes por incidente (com quebras de linha reais)
+    # ================== GOOGLE CHAT ==================
+    - name: Montar mensagem de RESUMO para Chat
       set_fact:
-        incident_details: >-
-          {{
-            incident_details | default([]) +
-            [(
-              "*Ticket:* " ~ (item.number | default("N/A")) ~ "\n"
-              ~ "*Título:* " ~ (item.short_description | default("N/A")) ~ "\n"
-              ~ "*Descrição:* " ~ (item.description | default("N/A")) ~ "\n"
-              ~ "*Responsável:* " ~ (item.assigned_to | default("None")) ~ "\n"
-              ~ "*Prioridade:* " ~ (item.priority | default("N/A") | string) ~ "\n"
-              ~ "*Estado:* " ~ (item.state | default("N/A") | string) ~ "\n"
-              ~ "*Categoria:* " ~ (item.category | default("N/A")) ~ "\n"
-              ~ "*Aberto em:* " ~ (item.opened_at | default("N/A")) ~ "\n"
-              ~ "*Última atualização:* " ~ (item.sys_updated_on | default("N/A")) ~ "\n"
-              ~ "*Assignment group:* " ~ (item.assignment_group | default("")) ~ "\n"
-              ~ "*Aprovação:* " ~ (item.approval | default("N/A")) ~ "\n"
-              ~ "*Made SLA:* " ~ (item.made_sla | default("N/A") | string) ~ "\n"
-              ~ "*Sys ID:* " ~ (item.sys_id | default("N/A"))
-            )]
-          }}
-      loop: "{{ inc_all }}"
-
-    - name: Montar mensagem final com resumo + detalhes
-      set_fact:
-        chat_text: |
-          *Resumo SLA Incidentes*
-          - Novos (≤{{ window_minutes_new }}min): {{ novos | length }}
+        chat_summary_text: |
+          *Resumo SLA Incidentes (ServiceNow)*
+          - Novos (<= {{ window_minutes_new }} min): {{ novos | length }}
           - Fora do prazo de nomeação: {{ fora_nomeacao | length }}
           - Fora do prazo de resolução: {{ fora_resolucao | length }}
-          - Próximos de violar SLA (≤{{ near_breach_minutes }}min): {{ near_breach | length }}
+          - Próximos de violar SLA (<= {{ near_breach_minutes }} min): {{ near_breach | length }}
+          - Resolvidos (últimos {{ include_closed_days }}d): {{ inc_closed_recent | length }}
 
           *Tickets novos:* {{ novos | map(attribute='number') | list }}
           *Tickets fora nomeação:* {{ fora_nomeacao | map(attribute='number') | list }}
           *Tickets fora resolução:* {{ fora_resolucao | map(attribute='number') | list }}
           *Tickets próximos SLA:* {{ near_breach | map(attribute='number') | list }}
+          *Tickets resolvidos recentes:* {{ inc_closed_recent | map(attribute='number') | list }}
 
-          *Detalhes dos incidentes:*
-          {{ incident_details | join('\n\n---\n\n') }}
-
-    - name: Pré-visualizar mensagem
-      debug:
-        var: chat_text
-
-    - name: Enviar mensagem para Google Chat
+    - name: Enviar RESUMO ao Google Chat
+      when: google_chat_webhook_url is defined
       uri:
         url: "{{ google_chat_webhook_url }}"
         method: POST
         headers:
           Content-Type: "application/json; charset=UTF-8"
         body_format: json
-        body:
-          text: "{{ chat_text }}"
+        body: { text: "{{ chat_summary_text }}" }
         status_code: 200
-      when: google_chat_webhook_url is defined
+
+    # Quais buckets terão DETALHES?
+    - name: Determinar quais buckets entram nos DETALHES
+      set_fact:
+        detalhes_targets: >-
+          {{
+            []
+            + (( 'novos'         in (chat_detail_buckets | default([])) ) | ternary(novos, []))
+            + (( 'fora_nomeacao' in (chat_detail_buckets | default([])) ) | ternary(fora_nomeacao, []))
+            + (( 'fora_resolucao'in (chat_detail_buckets | default([])) ) | ternary(fora_resolucao, []))
+            + (( 'near_breach'   in (chat_detail_buckets | default([])) ) | ternary(near_breach, []))
+            + (( 'closed_recent' in (chat_detail_buckets | default([])) ) | ternary(inc_closed_recent, []))
+          }}
+
+    # ----- 1 card por incidente -----
+    - name: Zerar acumulador de mensagens por incidente
+      set_fact:
+        incident_cards: []
+
+    - name: Montar card (texto) por incidente
+      set_fact:
+        incident_cards: >-
+          {{
+            incident_cards + [
+              (
+                [
+                  "*Ticket:* " ~ (item.number | default("N/A")),
+                  "*Título:* " ~ (item.short_description | default("N/A")),
+                  "*Descrição:* " ~ descr_final,
+                  "*Responsável:* " ~ owner_print,
+                  "*Prioridade:* " ~ ((item.priority | default("N/A")) | string),
+                  "*Estado:* " ~ state_label,
+                  ( item.resolved_at is defined and (item.resolved_at | string | length) > 0 )
+                    | ternary( '*Resolvido em:* ' ~ (item.resolved_at | string), omit ),
+                  "*Categoria:* " ~ (item.category | default("N/A") | string),
+                  "*Aberto em:* " ~ (item.opened_at | default("N/A")),
+                  "*Última atualização:* " ~ (item.sys_updated_on | default("N/A")),
+                  "*Assignment group:* " ~ (item.assignment_group | default("") | string),
+                  "*Aprovação:* " ~ (item.approval | default("N/A") | string),
+                  "*Made SLA:* " ~ (item.made_sla | default("N/A") | string),
+                  "*Sys ID:* " ~ (item.sys_id | default("N/A") | string)
+                ]
+                | reject('equalto', omit)
+                | join("\n")
+              )
+            ]
+          }}
+      vars:
+        state_code: "{{ (item.state | default(item.incident_state | default('')) | string) }}"
+        state_label: "{{ state_map.get(state_code, state_code) }}"
+        descr_raw: >-
+          {{
+              (item.description | default('') | string | trim)
+           or (item.u_problem_description | default('') | string | trim)
+           or (item.comments | default('') | string | trim)
+           or (item.work_notes | default('') | string | trim)
+           or (item.short_description | default('') | string | trim)
+          }}
+        descr_normalized: "{{ descr_raw | regex_replace('\\\\n', '\n') }}"
+        descr_final: >-
+          {{
+            (descr_normalized[:2000] ~ ('…' if (descr_normalized | length) > 2000 else ''))
+          }}
+        owner: "{{ (item.assigned_to | default('') | string | trim) }}"
+        owner_print: "{{ owner if owner else '(não atribuído)' }}"
+      loop: "{{ detalhes_targets }}"
+      loop_control: { label: "{{ item.number | default('sem-number') }}" }
+
+    - name: Sanitizar cards (trocar '\n' literal por newline real)
+      set_fact:
+        incident_cards_clean: "{{ incident_cards | map('regex_replace', '\\\\n', '\n') | list }}"
+
+    - name: Enviar UMA MENSAGEM por incidente ao Google Chat
+      when:
+        - google_chat_webhook_url is defined
+        - (incident_cards_clean | length) > 0
+      uri:
+        url: "{{ google_chat_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json; charset=UTF-8"
+        body_format: json
+        body: { text: "{{ item }}" }
+        status_code: 200
+      loop: "{{ incident_cards_clean }}"
 
