@@ -1,5 +1,5 @@
 ---
-- name: Incidentes (ServiceNow) -> classificação de SLA -> Google Chat
+- name: Incidentes (ServiceNow) -> enviar tudo para Google Chat (sem filtros)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -7,34 +7,11 @@
     - servicenow.itsm
 
   vars:
-    # ======== Regras de SLA (minutos) ========
-    near_breach_minutes: 60
-    window_minutes_new: 15
-    nomeacao_minutos:
-      1: 15
-      2: 30
-      3: 90
-      4: 180
-      5: 9999
-    resolucao_minutos:
-      1: 240
-      2: 900
-      3: 3600
-      4: 7200
-      default: 14400
-
-    # ======== Google Chat ========
+    # ======== Google Chat (defina via -e ou var de group/host) ========
+    # Ex.: -e google_chat_webhook_url="https://chat.googleapis.com/v1/spaces/..."
     google_chat_webhook_url: "{{ google_chat_webhook_url | default(omit) }}"
-    chat_detail_buckets:
-      - fora_nomeacao
-      - fora_resolucao
-      - near_breach
-      # - closed_recent   # descomente se quiser detalhar resolvidos recentes também
 
-    # ======== “Resolvidos recentes” ========
-    include_closed_days: 30   # janela (dias)
-
-    # ======== Mapa de estados ========
+    # ======== Mapa de estados (opcional, só para impressão mais amigável) ========
     state_map:
       "1": New
       "2": In Progress
@@ -65,234 +42,48 @@
           Defina snow_instance/snow_username/snow_password via -e
           ou exporte SN_HOST/SN_USERNAME/SN_PASSWORD no ambiente.
 
-    - name: Mostrar credenciais resolvidas (sem senha)
-      debug:
-        msg:
-          - "ServiceNow instance: {{ sn_instance }}"
-          - "ServiceNow username: {{ sn_username }}"
-
   tasks:
     # ================== COLETA (ServiceNow) ==================
-    - name: Buscar incidentes abertos (active=true) no grupo (ajuste a query se precisar)
+    - name: Buscar incidentes ativos do grupo TD-CYBEROPS-CSIRT-BR (sem filtros adicionais)
       servicenow.itsm.incident_info:
         instance:
           host: "{{ sn_instance }}"
           username: "{{ sn_username }}"
           password: "{{ sn_password }}"
-        # Ex.: apenas abertos do grupo xxxx BR:
         sysparm_query: "active=true^assignment_group.name=TD-CYBEROPS-CSIRT-BR"
-        #sysparm_query: "active=true"   # <-- use isto para buscar todos abertos
-        sysparm_display_value: "true"   # retorna nomes legíveis em campos de referência
+        sysparm_display_value: "true"   # retorna nomes legíveis para campos de referência
       register: abertas
 
-    - name: Normalizar lista de incidentes (cru)
+    - name: Normalizar lista de incidentes (tudo que veio ativo)
       set_fact:
-        inc_all_raw: "{{ abertas.records | default([]) }}"
+        inc_all: "{{ abertas.records | default([]) }}"
 
-    # Só “abertos/ativos” para os buckets de SLA (exclui state 6)
-    - name: Filtrar incidentes ativos/abertos (flex)
-      set_fact:
-        inc_all: >-
-          {{
-            (
-              (inc_all_raw | selectattr('active', 'equalto', 'true')) +
-              (inc_all_raw | selectattr('active', 'equalto', true))
-            )
-            | selectattr('incident_state', 'defined')
-            | rejectattr('incident_state', 'equalto', '6')
-            | rejectattr('incident_state', 'equalto', 6)
-            | list
-          }}
-
-    - name: Contagem total considerada (abertos/ativos)
+    - name: Log de contagem
       debug:
-        msg: "Total de incidentes considerados (abertos): {{ inc_all | length }}"
+        msg: "Incidentes ativos encontrados: {{ inc_all | length }}"
 
-    # ================== CORTES / EPOCH (sem shell) ==================
-    - name: Epoch atual (UTC) para cortes
-      set_fact:
-        now_epoch: "{{ '%s' | strftime | int }}"
-
-    # ================== “RESOLVIDOS RECENTES” (por STRING) ==================
-    - name: Gerar data/hora de corte (string UTC) para resolvidos recentes
-      set_fact:
-        closed_cut_dt_str: >-
-          {{
-            '%Y-%m-%d %H:%M:%S'
-            | strftime( (now_epoch | int) - ((include_closed_days | int) * 86400), utc=True )
-          }}
-
-    - name: Inicializar coleção de resolvidos recentes
-      set_fact:
-        inc_closed_recent: []
-
-    - name: Coletar incidentes resolvidos nos últimos {{ include_closed_days }} dias
-      set_fact:
-        inc_closed_recent: "{{ inc_closed_recent + [ item ] }}"
-      loop: "{{ inc_all_raw }}"
-      loop_control: { label: "{{ item.number | default('sem-number') }}" }
-      when:
-        - item.incident_state is defined
-        - (item.incident_state | string) == '6'
-        - (item.resolved_at | default('') | string | length) > 0
-        - (item.resolved_at | string) >= (closed_cut_dt_str | string)
-
-    # ================== CLASSIFICAÇÃO (ABERTOS, por STRING) ==================
-    - name: Inicializar buckets (abertos)
-      set_fact:
-        fora_nomeacao: []
-        fora_resolucao: []
-        near_breach: []
-        novos: []
-
-    # --- NOVOS (<= janela) ---
-    - name: Corte para NOVOS (<= janela)
-      set_fact:
-        cutoff_new_str: >-
-          {{
-            '%Y-%m-%d %H:%M:%S'
-            | strftime( (now_epoch | int) - ((window_minutes_new | int) * 60), utc=True )
-          }}
-
-    - name: Classificar incidentes NOVOS (<= {{ window_minutes_new }} min)
-      set_fact:
-        novos: "{{ novos + [ item ] }}"
-      loop: "{{ inc_all }}"
-      loop_control: { label: "{{ item.number | default('sem-number') }}" }
-      vars:
-        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
-      when:
-        - (opened_str | length) > 0
-        - (opened_str | string) >= (cutoff_new_str | string)
-
-    # --- FORA DO PRAZO DE NOMEAÇÃO ---
-    - name: Classificar incidentes FORA DO PRAZO DE NOMEAÇÃO
-      set_fact:
-        fora_nomeacao: "{{ fora_nomeacao + [ item ] }}"
-      loop: "{{ inc_all }}"
-      loop_control: { label: "{{ item.number | default('sem-number') }}" }
-      vars:
-        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
-        prio: "{{ (item.priority | default(5)) | int }}"
-        limite_nomeacao_sec: "{{ (nomeacao_minutos.get(prio, 9999) | int) * 60 }}"
-        cutoff_nomeacao_str: >-
-          {{
-            '%Y-%m-%d %H:%M:%S'
-            | strftime( (now_epoch | int) - (limite_nomeacao_sec | int), utc=True )
-          }}
-        tem_owner: "{{ (item.assigned_to is defined) and ((item.assigned_to | string | trim) != '') }}"
-      when:
-        - (opened_str | length) > 0
-        - not tem_owner
-        - (opened_str | string) <= (cutoff_nomeacao_str | string)
-
-    # --- FORA DO PRAZO DE RESOLUÇÃO ---
-    - name: Classificar incidentes FORA DO PRAZO DE RESOLUÇÃO
-      set_fact:
-        fora_resolucao: "{{ fora_resolucao + [ item ] }}"
-      loop: "{{ inc_all }}"
-      loop_control: { label: "{{ item.number | default('sem-number') }}" }
-      vars:
-        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
-        prio: "{{ (item.priority | default(5)) | int }}"
-        limite_resolucao_sec: "{{ (resolucao_minutos.get(prio, resolucao_minutos['default']) | int) * 60 }}"
-        cutoff_resolucao_str: >-
-          {{
-            '%Y-%m-%d %H:%M:%S'
-            | strftime( (now_epoch | int) - (limite_resolucao_sec | int), utc=True )
-          }}
-      when:
-        - (opened_str | length) > 0
-        - (opened_str | string) <= (cutoff_resolucao_str | string)
-
-    # --- PRÓXIMOS DE VIOLAR SLA (janela) ---
-    - name: Classificar incidentes PRÓXIMOS DE VIOLAR SLA (<= {{ near_breach_minutes }} min)
-      set_fact:
-        near_breach: "{{ near_breach + [ item ] }}"
-      loop: "{{ inc_all }}"
-      loop_control: { label: "{{ item.number | default('sem-number') }}" }
-      vars:
-        opened_str: "{{ item.opened_at | default('1970-01-01 00:00:00') | string }}"
-        prio: "{{ (item.priority | default(5)) | int }}"
-        limite_resolucao_sec: "{{ (resolucao_minutos.get(prio, resolucao_minutos['default']) | int) * 60 }}"
-        nb_sec: "{{ (near_breach_minutes | int) * 60 }}"
-        lower_sec: "{{ (limite_resolucao_sec | int) - (nb_sec | int) }}"
-        lower_sec_norm: "{{ (lower_sec | int) if (lower_sec | int) > 0 else 0 }}"
-        c1_str: >-
-          {{
-            '%Y-%m-%d %H:%M:%S'
-            | strftime( (now_epoch | int) - (limite_resolucao_sec | int), utc=True )
-          }}
-        c2_str: >-
-          {{
-            '%Y-%m-%d %H:%M:%S'
-            | strftime( (now_epoch | int) - (lower_sec_norm | int), utc=True )
-          }}
-      when:
-        - (opened_str | length) > 0
-        - (opened_str | string) >  (c1_str | string)
-        - (opened_str | string) <= (c2_str | string)
-
-    # ================== RESUMO ==================
-    - name: Resumo e listas por bucket
-      debug:
-        msg:
-          resumo:
-            novos: "{{ novos | length }}"
-            fora_nomeacao: "{{ fora_nomeacao | length }}"
-            fora_resolucao: "{{ fora_resolucao | length }}"
-            near_breach: "{{ near_breach | length }}"
-            closed_recent: "{{ inc_closed_recent | length }}"
-            total_incidentes_abertos: "{{ inc_all | length }}"
-          tickets:
-            novos: "{{ novos | map(attribute='number') | list | default([]) }}"
-            fora_nomeacao: "{{ fora_nomeacao | map(attribute='number') | list | default([]) }}"
-            fora_resolucao: "{{ fora_resolucao | map(attribute='number') | list | default([]) }}"
-            near_breach: "{{ near_breach | map(attribute='number') | list | default([]) }}"
-            closed_recent: "{{ inc_closed_recent | map(attribute='number') | list | default([]) }}"
-
-    # ================== GOOGLE CHAT ==================
-    - name: Montar mensagem de RESUMO para Chat
+    # ================== MENSAGEM - RESUMO OPCIONAL ==================
+    - name: Montar mensagem de RESUMO simples
       set_fact:
         chat_summary_text: |
-          *Resumo SLA Incidentes (ServiceNow)*
-          - Novos (<= {{ window_minutes_new }} min): {{ novos | length }}
-          - Fora do prazo de nomeação: {{ fora_nomeacao | length }}
-          - Fora do prazo de resolução: {{ fora_resolucao | length }}
-          - Próximos de violar SLA (<= {{ near_breach_minutes }} min): {{ near_breach | length }}
-          - Resolvidos (últimos {{ include_closed_days }}d): {{ inc_closed_recent | length }}
-
-          *Tickets novos:* {{ novos | map(attribute='number') | list }}
-          *Tickets fora nomeação:* {{ fora_nomeacao | map(attribute='number') | list }}
-          *Tickets fora resolução:* {{ fora_resolucao | map(attribute='number') | list }}
-          *Tickets próximos SLA:* {{ near_breach | map(attribute='number') | list }}
-          *Tickets resolvidos recentes:* {{ inc_closed_recent | map(attribute='number') | list }}
+          *Incidentes ativos (TD-CYBEROPS-CSIRT-BR | ServiceNow)*
+          Total: {{ inc_all | length }}
+          Tickets: {{ inc_all | map(attribute='number') | list | default([]) }}
 
     - name: Enviar RESUMO ao Google Chat
-      when: google_chat_webhook_url is defined
+      when:
+        - google_chat_webhook_url is defined
       uri:
         url: "{{ google_chat_webhook_url }}"
         method: POST
         headers:
           Content-Type: "application/json; charset=UTF-8"
         body_format: json
-        body: { text: "{{ chat_summary_text }}" }
+        body:
+          text: "{{ chat_summary_text }}"
         status_code: 200
 
-    # Quais buckets terão DETALHES?
-    - name: Determinar quais buckets entram nos DETALHES
-      set_fact:
-        detalhes_targets: >-
-          {{
-            []
-            + (( 'novos'         in (chat_detail_buckets | default([])) ) | ternary(novos, []))
-            + (( 'fora_nomeacao' in (chat_detail_buckets | default([])) ) | ternary(fora_nomeacao, []))
-            + (( 'fora_resolucao'in (chat_detail_buckets | default([])) ) | ternary(fora_resolucao, []))
-            + (( 'near_breach'   in (chat_detail_buckets | default([])) ) | ternary(near_breach, []))
-            + (( 'closed_recent' in (chat_detail_buckets | default([])) ) | ternary(inc_closed_recent, []))
-          }}
-
-    # ----- 1 card por incidente -----
+    # ================== MENSAGEM - 1 CARD POR INCIDENTE ==================
     - name: Zerar acumulador de mensagens por incidente
       set_fact:
         incident_cards: []
@@ -310,8 +101,6 @@
                   "*Responsável:* " ~ owner_print,
                   "*Prioridade:* " ~ ((item.priority | default("N/A")) | string),
                   "*Estado:* " ~ state_label,
-                  ( item.resolved_at is defined and (item.resolved_at | string | length) > 0 )
-                    | ternary( '*Resolvido em:* ' ~ (item.resolved_at | string), omit ),
                   "*Categoria:* " ~ (item.category | default("N/A") | string),
                   "*Aberto em:* " ~ (item.opened_at | default("N/A")),
                   "*Última atualização:* " ~ (item.sys_updated_on | default("N/A")),
@@ -343,8 +132,9 @@
           }}
         owner: "{{ (item.assigned_to | default('') | string | trim) }}"
         owner_print: "{{ owner if owner else '(não atribuído)' }}"
-      loop: "{{ detalhes_targets }}"
-      loop_control: { label: "{{ item.number | default('sem-number') }}" }
+      loop: "{{ inc_all }}"
+      loop_control:
+        label: "{{ item.number | default('sem-number') }}"
 
     - name: Sanitizar cards (trocar '\n' literal por newline real)
       set_fact:
@@ -360,7 +150,8 @@
         headers:
           Content-Type: "application/json; charset=UTF-8"
         body_format: json
-        body: { text: "{{ item }}" }
+        body:
+          text: "{{ item }}"
         status_code: 200
       loop: "{{ incident_cards_clean }}"
 
