@@ -126,10 +126,7 @@
            or (item.short_description | default('') | string | trim)
           }}
         descr_normalized: "{{ descr_raw | regex_replace('\\\\n', '\n') }}"
-        descr_final: >-
-          {{
-            (descr_normalized[:2000] ~ ('…' if (descr_normalized | length) > 2000 else ''))
-          }}
+        descr_final: "{{ descr_normalized | truncate(2000, True, '…') }}"
         owner: "{{ (item.assigned_to | default('') | string | trim) }}"
         owner_print: "{{ owner if owner else '(não atribuído)' }}"
       loop: "{{ inc_all }}"
