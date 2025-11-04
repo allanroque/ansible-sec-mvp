@@ -146,10 +146,8 @@
         method: POST
         headers:
           Content-Type: "application/json; charset=UTF-8"
-        body_format: json
-        body: "{{ {'text': item} | to_json }}"
+        body: "{{ {'text': item | truncate(4000, True, '…')} | to_json }}"
         status_code: 200
       loop: "{{ incident_cards_clean }}"
       loop_control:
         label: "{{ item.split('\n')[0] }}"
-
